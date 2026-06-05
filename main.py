@@ -19,8 +19,30 @@ import asyncio
 import os
 import sys
 
+from aiohttp import web
+
 import config
 from bot import PhoneboothBot
+
+
+async def start_health_server() -> None:
+    """Serve a tiny health endpoint for container hosts such as Railway."""
+    port = int(os.getenv("PORT", "8080"))
+
+    async def health(_: web.Request) -> web.Response:
+        return web.Response(text="OK")
+
+    app = web.Application()
+    app.router.add_get("/", health)
+    app.router.add_get("/health", health)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
+    while True:
+        await asyncio.sleep(3600)
 
 
 async def main() -> None:
@@ -35,7 +57,6 @@ async def main() -> None:
 
     # Start health-check HTTP server when running in a cloud container
     if os.environ.get("PORT"):
-        from gcp.healthcheck import start_health_server
         asyncio.create_task(start_health_server())
 
     try:
