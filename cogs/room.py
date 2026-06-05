@@ -95,10 +95,12 @@ def _get_avatar_url(member: discord.Member | discord.User) -> str:
     else:
         asset = member.display_avatar
     try:
-        url = str(asset.with_static_format("png").with_size(256).url)
-        return url.split("?")[0]
+        return str(asset.with_static_format("png").with_size(256).url)
     except Exception:
-        return str(member.default_avatar.url)
+        try:
+            return str(member.display_avatar.url)
+        except Exception:
+            return str(member.default_avatar.url)
 
 
 def _render_user_mentions(text: str, guild: discord.Guild | None) -> str:
