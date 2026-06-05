@@ -1,0 +1,9 @@
+.env
+*.db
+*.db-shm
+*.db-wal
+venv/
+__pycache__/
+*/__pycache__/
+migration_source/
+.pytest_cache/
