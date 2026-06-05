@@ -65,6 +65,8 @@ FOOTER       = "Fliphone • Cross-server chat roulette"
 # even without being the bot owner.
 TRUSTED_MOD_IDS: set[int] = {
     1129160384956342273,
+    944227083117297674,
+    1423635237505859689,
     *_parse_int_set(os.getenv("TRUSTED_MOD_IDS", "")),
 }
 

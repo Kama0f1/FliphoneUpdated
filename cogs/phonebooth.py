@@ -775,17 +775,17 @@ class Phonebooth(commands.Cog):
                 seen_norms.add(n)
                 all_gif_urls.append(u)
 
-        sender_gid = conn["guild_a"] if is_side_a else conn["guild_b"]
-        sender_gif_mode, receiver_gif_mode = await self.db.get_gif_modes_bulk(sender_gid, target_gid)
-
         safe_urls = list(all_gif_urls)
-        if sender_gif_mode == "disabled" or receiver_gif_mode == "disabled":
-            safe_urls = []
-        elif sender_gif_mode == "limited" or receiver_gif_mode == "limited":
-            safe_urls = [
-                u for u in safe_urls
-                if "tenor.com" in u.lower() or "giphy.com" in u.lower() or "klipy.com" in u.lower()
-            ]
+        if all_gif_urls:
+            sender_gid = conn["guild_a"] if is_side_a else conn["guild_b"]
+            sender_gif_mode, receiver_gif_mode = await self.db.get_gif_modes_bulk(sender_gid, target_gid)
+            if sender_gif_mode == "disabled" or receiver_gif_mode == "disabled":
+                safe_urls = []
+            elif sender_gif_mode == "limited" or receiver_gif_mode == "limited":
+                safe_urls = [
+                    u for u in safe_urls
+                    if "tenor.com" in u.lower() or "giphy.com" in u.lower() or "klipy.com" in u.lower()
+                ]
 
         for gif_url in [u for u in all_gif_urls if u not in safe_urls]:
             content = content.replace(gif_url, "")
@@ -840,7 +840,7 @@ class Phonebooth(commands.Cog):
                 pass
             return
 
-        await self.db.increment_message_count(conn["id"])
+        asyncio.create_task(self.db.increment_message_count(conn["id"]))
         # Reset inactivity timer — someone is talking
         self._reset_inactivity(conn["id"], conn["channel_a"], conn["channel_b"])
 
@@ -929,9 +929,6 @@ class Phonebooth(commands.Cog):
             return
         ctx = await self.bot.get_context(message)
         if ctx.valid:
-            return
-        cfg = await self.db.get_config_by_channel(message.channel.id)
-        if not cfg:
             return
         conn = await self.db.get_connection(message.channel.id)
         if not conn:
@@ -1323,23 +1320,45 @@ class Phonebooth(commands.Cog):
     @commands.command(name="profile", aliases=["settings", "me"])
     async def profile(self, ctx: commands.Context) -> None:
         """Show your Fliphone user settings and current server/channel state."""
-        notify_enabled = await self.db.get_notify_status(ctx.author.id)
-        is_banned = await self.db.is_user_banned(ctx.author.id)
-        queue_size = await self.db.get_queue_size()
-        active_calls = await self.db.get_active_connection_count()
+        notify_enabled, is_banned, queue_size, active_calls = await asyncio.gather(
+            self.db.get_notify_status(ctx.author.id),
+            self.db.is_user_banned(ctx.author.id),
+            self.db.get_queue_size(),
+            self.db.get_active_connection_count(),
+        )
 
         embed = discord.Embed(
-            title="Fliphone Profile",
+            title=f"{ctx.author.display_name} - Fliphone Profile",
+            description="Your current Fliphone settings and channel status.",
             color=config.COLOR_ERR if is_banned else config.COLOR_WAIT,
             timestamp=datetime.utcnow(),
         )
         embed.set_author(name=str(ctx.author), icon_url=_get_avatar_url(ctx.author))
-        embed.add_field(name="Notifications", value="On" if notify_enabled else "Off", inline=True)
-        embed.add_field(name="Access", value="Banned" if is_banned else "OK", inline=True)
-        embed.add_field(name="Global Queue", value=f"{queue_size} waiting / {active_calls} active", inline=True)
+        embed.set_thumbnail(url=_get_avatar_url(ctx.author))
+        embed.add_field(
+            name="Account",
+            value=(
+                f"Access: **{'Banned' if is_banned else 'OK'}**\n"
+                f"Notify DMs: **{'On' if notify_enabled else 'Off'}**"
+            ),
+            inline=True,
+        )
+        embed.add_field(
+            name="Network",
+            value=(
+                f"Waiting: **{queue_size}**\n"
+                f"Active calls: **{active_calls}**"
+            ),
+            inline=True,
+        )
 
         if ctx.guild:
-            guild_cfg = await self.db.get_guild_config(ctx.guild.id)
+            guild_cfg, conn, q, room_member = await asyncio.gather(
+                self.db.get_guild_config(ctx.guild.id),
+                self.db.get_connection(ctx.channel.id),
+                self.db.get_queue_entry(ctx.channel.id),
+                self.db.get_room_member(ctx.channel.id),
+            )
             if guild_cfg:
                 channel = self.bot.get_channel(guild_cfg["channel_id"])
                 current_mode = await self.db.get_gif_mode(ctx.guild.id)
@@ -1359,9 +1378,6 @@ class Phonebooth(commands.Cog):
                     inline=False,
                 )
 
-            conn = await self.db.get_connection(ctx.channel.id)
-            q = await self.db.get_queue_entry(ctx.channel.id)
-            room_member = await self.db.get_room_member(ctx.channel.id)
             if conn:
                 state = f"In a 1:1 call for {_duration_str(conn['started_at'])}."
             elif room_member:
@@ -1373,8 +1389,8 @@ class Phonebooth(commands.Cog):
             embed.add_field(name="This Channel", value=state, inline=False)
 
         embed.add_field(
-            name="Quick Commands",
-            value="`f.notify` toggles DMs. `f.status` checks this channel. `f.help` shows commands.",
+            name="Useful Commands",
+            value="`f.notify` - toggle DMs\n`f.status` - channel state\n`f.help` - command list",
             inline=False,
         )
         embed.set_footer(text=config.FOOTER)

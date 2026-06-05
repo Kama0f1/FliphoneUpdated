@@ -71,7 +71,24 @@ class GifReportSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         self.panel_view.selected_report_id = int(self.values[0])
-        await interaction.response.send_message(f"Selected GIF report #{self.values[0]}.", ephemeral=True)
+        report = await self.panel_view.cog.db.get_gif_report(self.panel_view.selected_report_id)
+        if not report:
+            await interaction.response.send_message("That GIF report no longer exists.", ephemeral=True)
+            return
+        embed = discord.Embed(
+            title=f"GIF Report #{report['id']}",
+            color=config.COLOR_WARN,
+        )
+        embed.add_field(name="URL", value=f"```\n{(report['url'] or '')[:950]}\n```", inline=False)
+        embed.add_field(
+            name="Reporter",
+            value=f"<@{report['reporter_id']}>" if report.get("reporter_id") else "unknown",
+            inline=True,
+        )
+        embed.add_field(name="Channel", value=f"<#{report['channel_id']}>", inline=True)
+        embed.add_field(name="Status", value=str(report.get("status") or "pending"), inline=True)
+        embed.set_footer(text="Use the panel buttons to blacklist, whitelist, or refresh.")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 class GifReportPanelView(discord.ui.View):
@@ -766,22 +783,26 @@ class Admin(commands.Cog, name="Admin"):
             embed.set_footer(text=config.FOOTER)
             return embed
 
-        lines = []
-        for report in pending[:20]:
-            reported_at = report["reported_at"][:10] if report["reported_at"] else "?"
-            url = report["url"] or ""
-            url_short = url[:60] + "..." if len(url) > 60 else url
-            reporter = f"<@{report['reporter_id']}>" if report["reporter_id"] else "unknown"
-            lines.append(
-                f"**#{report['id']}** - {reported_at} - {reporter}\n"
-                f"`{url_short}`"
-            )
-
         embed = discord.Embed(
             title=f"GIF Report Panel ({len(pending)} pending)",
-            description="\n".join(lines),
+            description="Select a report below, then blacklist or whitelist it.",
             color=config.COLOR_WARN,
         )
+        for report in pending[:10]:
+            reported_at = report["reported_at"][:10] if report["reported_at"] else "?"
+            url = report["url"] or ""
+            reporter = f"<@{report['reporter_id']}>" if report["reporter_id"] else "unknown"
+            embed.add_field(
+                name=f"#{report['id']} - {reported_at} - {reporter}",
+                value=f"```\n{url[:950]}\n```",
+                inline=False,
+            )
+        if len(pending) > 10:
+            embed.add_field(
+                name="More Reports",
+                value=f"{len(pending) - 10} more pending. Use the select menu to inspect them.",
+                inline=False,
+            )
         embed.set_footer(text="Use the select menu/buttons, or f.gifbl <id/url> and f.gifwl <id/url>.")
         return embed
 

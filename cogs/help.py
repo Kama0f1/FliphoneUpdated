@@ -81,12 +81,7 @@ class Help(commands.Cog):
             return True
         if ctx.author.id in config.TRUSTED_MOD_IDS:
             return True
-        return bool(
-            ctx.guild
-            and ctx.guild.id in config.TRUSTED_GUILD_IDS
-            and isinstance(ctx.author, discord.Member)
-            and ctx.author.guild_permissions.administrator
-        )
+        return False
 
     def _detail_embed(self, entry: tuple) -> discord.Embed:
         category, name, aliases, usage, description, permission = entry
