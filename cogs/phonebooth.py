@@ -942,11 +942,18 @@ class Phonebooth(commands.Cog):
     @commands.cooldown(1, 5, commands.BucketType.channel)
     async def call(self, ctx: commands.Context) -> None:
         """Dial into the queue, or connect instantly."""
-        if await self.db.is_user_banned(ctx.author.id):
+        is_banned, cfg, conn, room_member, q = await asyncio.gather(
+            self.db.is_user_banned(ctx.author.id),
+            self.db.get_config_by_channel(ctx.channel.id),
+            self.db.get_connection(ctx.channel.id),
+            self.db.get_room_member(ctx.channel.id),
+            self.db.get_queue_entry(ctx.channel.id),
+        )
+
+        if is_banned:
             await ctx.send("🚫 You are banned from using Fliphone.")
             return
 
-        cfg = await self.db.get_config_by_channel(ctx.channel.id)
         if not cfg:
             guild_cfg = await self.db.get_guild_config(ctx.guild.id)
             if guild_cfg:
@@ -956,22 +963,20 @@ class Phonebooth(commands.Cog):
                 await ctx.send("❌ Fliphone isn't set up. An admin should run `f.setup` in the target channel.")
             return
 
-        conn = await self.db.get_connection(ctx.channel.id)
         if conn:
             await ctx.send(f"📞 Already in a call ({_duration_str(conn['started_at'])}). Use `f.hangup` to end it first.")
             return
 
         # Block joining a 1:1 call while the channel is in a group room
-        if await self.db.get_room_member(ctx.channel.id):
+        if room_member:
             await ctx.send("📡 This channel is currently in a group room. Use `f.roomleave` first.")
             return
 
-        q = await self.db.get_queue_entry(ctx.channel.id)
         if q:
             await ctx.send(f"⏳ Already waiting ({_duration_str(q['joined_at'])}). Use `f.hangup` to cancel.")
             return
 
-        wh_url = await self.get_or_create_webhook(ctx.channel)
+        wh_url = cfg.get("webhook_url") or await self.get_or_create_webhook(ctx.channel)
         match  = await self.db.get_queue_match(ctx.guild.id, ctx.channel.id)
 
         if match:
@@ -1025,15 +1030,17 @@ class Phonebooth(commands.Cog):
             )
             self._start_timeout(ctx.channel.id)
             self._start_queue_nudge(ctx.channel.id, ctx.author.id)
-            queue_size = await self.db.get_queue_size()
-            active     = await self.db.get_active_connection_count()
+            queue_size, active = await asyncio.gather(
+                self.db.get_queue_size(),
+                self.db.get_active_connection_count(),
+            )
             await ctx.send(
                 f"📳 **Searching for someone to talk to...** ({queue_size} waiting, {active} active calls)\n"
                 f"Estimated wait: **instant if someone dials, otherwise up to {config.QUEUE_TIMEOUT} min**.\n"
                 f"Use `f.hangup` to cancel. Auto-cancels in {config.QUEUE_TIMEOUT} min."
             )
             # Notify opted-in subscribers that someone is waiting
-            await self._fire_notify(ctx.author.id)
+            asyncio.create_task(self._fire_notify(ctx.author.id))
 
     # ── f.hangup ──────────────────────────────────────────────────────────────
 
