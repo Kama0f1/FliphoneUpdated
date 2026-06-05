@@ -221,13 +221,31 @@ class GifReportView(discord.ui.View):
                     text=f"f.gifbl {report_id} → blacklist  |  f.gifwl {report_id} → whitelist  |  {config.FOOTER}"
                 )
                 try:
-                    await log_ch.send(embed=log_embed)
+                    await log_ch.send(embed=log_embed, view=GifReportLogView())
                 except discord.HTTPException:
                     pass
 
         await interaction.followup.send(
             "✅ GIF removed and flagged for review. Thanks!", ephemeral=True
         )
+
+class GifReportLogView(discord.ui.View):
+    def __init__(self) -> None:
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Review Reports",
+        style=discord.ButtonStyle.primary,
+        custom_id="pb_gif_report_panel",
+    )
+    async def review_reports(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        admin_cog = interaction.client.get_cog("Admin")
+        if not admin_cog or not hasattr(admin_cog, "send_gif_report_panel_interaction"):
+            await interaction.response.send_message("GIF report panel is not loaded yet.", ephemeral=True)
+            return
+        await admin_cog.send_gif_report_panel_interaction(interaction)
 
 
 _CONNECTED_MSG = (

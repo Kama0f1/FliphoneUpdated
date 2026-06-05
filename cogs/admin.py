@@ -131,6 +131,18 @@ class Admin(commands.Cog, name="Admin"):
         self.bot = bot
         self.db: Database = bot.db
 
+    def create_gif_report_panel_view(self, reports: list[dict]) -> Optional[discord.ui.View]:
+        return GifReportPanelView(self, reports) if reports else None
+
+    async def send_gif_report_panel_interaction(self, interaction: discord.Interaction) -> None:
+        if not await self._is_global_mod(interaction.user, interaction.guild):
+            await interaction.response.send_message("You do not have permission to use this panel.", ephemeral=True)
+            return
+        pending = await self.db.get_pending_gif_reports()
+        embed = self._build_gif_reports_embed(pending)
+        view = self.create_gif_report_panel_view(pending)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
     async def _build_check_embed(
         self,
         guild: discord.Guild,
@@ -715,7 +727,7 @@ class Admin(commands.Cog, name="Admin"):
             return
         pending = await self.db.get_pending_gif_reports()
         embed = self._build_gif_reports_embed(pending)
-        view = GifReportPanelView(self, pending) if pending else None
+        view = self.create_gif_report_panel_view(pending)
         await ctx.send(embed=embed, view=view)
         return
         if not pending:

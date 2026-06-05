@@ -125,7 +125,8 @@ class PhoneboothBot(commands.AutoShardedBot):
         await self.load_extension("cogs.room")
         await self.load_extension("cogs.vote")
         await self.load_extension("cogs.report")
-        from cogs.phonebooth import GifReportView
+        from cogs.phonebooth import GifReportLogView, GifReportView
+        self.add_view(GifReportLogView())
         self.add_view(GifReportView())
         # Load custom censor words from DB into filter
         import filter as flt
