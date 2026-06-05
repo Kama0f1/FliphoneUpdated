@@ -529,6 +529,18 @@ class Database:
             (webhook_url, channel_id),
         )
 
+    async def update_connection_webhook(self, channel_id: int, webhook_url: Optional[str]) -> None:
+        await self._execute(
+            """
+            UPDATE connections
+            SET
+                webhook_a = CASE WHEN channel_a = ? THEN ? ELSE webhook_a END,
+                webhook_b = CASE WHEN channel_b = ? THEN ? ELSE webhook_b END
+            WHERE channel_a = ? OR channel_b = ?
+            """,
+            (channel_id, webhook_url, channel_id, webhook_url, channel_id, channel_id),
+        )
+
     async def add_to_queue(self, channel_id, guild_id, user_id, webhook_url) -> None:
         await self._execute(
             """

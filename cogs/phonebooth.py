@@ -588,6 +588,28 @@ class Phonebooth(commands.Cog):
             self._wh_obj_cache.pop(url, None)
             return None if wait else False
 
+    async def _repair_relay_webhook(
+        self,
+        channel: discord.abc.GuildChannel,
+        conn: dict,
+    ) -> Optional[str]:
+        if not isinstance(channel, discord.TextChannel):
+            return None
+        webhook_url = await self.get_or_create_webhook(channel)
+        if not webhook_url:
+            return None
+
+        await asyncio.gather(
+            self.db.update_webhook(channel.id, webhook_url),
+            self.db.update_connection_webhook(channel.id, webhook_url),
+        )
+        if channel.id == conn["channel_a"]:
+            conn["webhook_a"] = webhook_url
+        elif channel.id == conn["channel_b"]:
+            conn["webhook_b"] = webhook_url
+        self._cache_connection(conn)
+        return webhook_url
+
     async def _send_gifmode_connect_notices(
         self,
         channel_a: discord.abc.Messageable,
@@ -904,23 +926,35 @@ class Phonebooth(commands.Cog):
         report_ch_id = int(config.REPORT_LOG_CHANNEL_ID) if config.REPORT_LOG_CHANNEL_ID else 0
 
         # ── Send via webhook ──────────────────────────────────────────────────
+        report_cog = self.bot.get_cog("Report")
+        if report_cog:
+            report_cog.record_message(
+                conn_id=conn["id"],
+                user_id=message.author.id,
+                username=str(message.author),
+                display_name=message.author.display_name,
+                guild_id=message.guild.id,
+                guild_name=message.guild.name,
+            )
+        need_id = bool(reportable_gif_urls)
+        target_channel = self.bot.get_channel(target_cid)
+
+        if not target_wh and target_channel:
+            target_wh = await self._repair_relay_webhook(target_channel, conn)
+
         if target_wh:
-            report_cog = self.bot.get_cog("Report")
-            if report_cog:
-                report_cog.record_message(
-                    conn_id=conn["id"],
-                    user_id=message.author.id,
-                    username=str(message.author),
-                    display_name=message.author.display_name,
-                    guild_id=message.guild.id,
-                    guild_name=message.guild.name,
-                )
-            # Only wait=True when we need the message ID for GIF report cards
-            need_id = bool(reportable_gif_urls)
             main_wh_msg = await self._send_webhook(
                 target_wh, text_content, display_name, avatar_url, files,
                 reply_embed=reply_embed, wait=need_id, silent=bool(reportable_gif_urls),
             )
+            if not main_wh_msg and target_channel:
+                repaired_wh = await self._repair_relay_webhook(target_channel, conn)
+                if repaired_wh:
+                    target_wh = repaired_wh
+                    main_wh_msg = await self._send_webhook(
+                        target_wh, text_content, display_name, avatar_url, files,
+                        reply_embed=reply_embed, wait=need_id, silent=bool(reportable_gif_urls),
+                    )
             if main_wh_msg:
                 # Send GIFs separately when there's a reply embed so Discord embeds them
                 gif_wh_msg = None
@@ -947,7 +981,6 @@ class Phonebooth(commands.Cog):
                 return
 
         # ── Fallback: plain bot message ───────────────────────────────────────
-        target_channel = self.bot.get_channel(target_cid)
         if not target_channel:
             return
 
