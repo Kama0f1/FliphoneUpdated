@@ -281,6 +281,9 @@ class Phonebooth(commands.Cog):
         self._rl_warns: dict[int, int]   = {}
         # guild_id -> last call info, used by report.py to identify partner after hangup/skip
         self._last_calls: dict[int, dict] = {}
+        self._conn_by_channel: dict[int, dict] = {}
+        self._cfg_by_channel: dict[int, dict] = {}
+        self._cfg_by_guild: dict[int, dict] = {}
         self._session: aiohttp.ClientSession | None = None
         self._wh_obj_cache: dict[str, discord.Webhook] = {}
         self._cleanup_loop.start()
@@ -300,6 +303,58 @@ class Phonebooth(commands.Cog):
             task.cancel()
         if self._session and not self._session.closed:
             asyncio.create_task(self._session.close())
+
+    def _cache_config(self, cfg: Optional[dict]) -> None:
+        if not cfg:
+            return
+        self._cfg_by_channel[int(cfg["channel_id"])] = cfg
+        self._cfg_by_guild[int(cfg["guild_id"])] = cfg
+
+    def _invalidate_config(self, *, guild_id: Optional[int] = None, channel_id: Optional[int] = None) -> None:
+        cfg = None
+        if channel_id is not None:
+            cfg = self._cfg_by_channel.pop(int(channel_id), None)
+        if guild_id is not None:
+            cfg = self._cfg_by_guild.pop(int(guild_id), cfg)
+        if cfg:
+            self._cfg_by_channel.pop(int(cfg["channel_id"]), None)
+            self._cfg_by_guild.pop(int(cfg["guild_id"]), None)
+
+    async def _get_config_by_channel_cached(self, channel_id: int) -> Optional[dict]:
+        cfg = self._cfg_by_channel.get(int(channel_id))
+        if cfg:
+            return cfg
+        cfg = await self.db.get_config_by_channel(channel_id)
+        self._cache_config(cfg)
+        return cfg
+
+    async def _get_guild_config_cached(self, guild_id: int) -> Optional[dict]:
+        cfg = self._cfg_by_guild.get(int(guild_id))
+        if cfg:
+            return cfg
+        cfg = await self.db.get_guild_config(guild_id)
+        self._cache_config(cfg)
+        return cfg
+
+    def _cache_connection(self, conn: Optional[dict]) -> None:
+        if not conn:
+            return
+        self._conn_by_channel[int(conn["channel_a"])] = conn
+        self._conn_by_channel[int(conn["channel_b"])] = conn
+
+    def _invalidate_connection(self, conn: Optional[dict]) -> None:
+        if not conn:
+            return
+        self._conn_by_channel.pop(int(conn["channel_a"]), None)
+        self._conn_by_channel.pop(int(conn["channel_b"]), None)
+
+    async def _get_connection_cached(self, channel_id: int) -> Optional[dict]:
+        conn = self._conn_by_channel.get(int(channel_id))
+        if conn:
+            return conn
+        conn = await self.db.get_connection(channel_id)
+        self._cache_connection(conn)
+        return conn
 
     async def _check_gif_admin(self, ctx: commands.Context) -> bool:
         """Allow only server owner or administrators to manage GIF mode."""
@@ -339,7 +394,7 @@ class Phonebooth(commands.Cog):
         if not entry or entry["user_id"] != user_id:
             self._queue_nudges.pop(channel_id, None)
             return
-        if await self.db.get_connection(channel_id):
+        if await self._get_connection_cached(channel_id):
             self._queue_nudges.pop(channel_id, None)
             return
         if await self.db.get_notify_status(user_id):
@@ -384,7 +439,7 @@ class Phonebooth(commands.Cog):
         """Auto-hangup a call after INACTIVITY_MINUTES of no messages."""
         await asyncio.sleep(self.INACTIVITY_MINUTES * 60)
         # Check call still active
-        conn = await self.db.get_connection(channel_a)
+        conn = await self._get_connection_cached(channel_a)
         if not conn or conn["id"] != conn_id:
             return
         # Cache last call for both guilds so report.py can find the partner
@@ -416,6 +471,7 @@ class Phonebooth(commands.Cog):
             "conn_id": conn["id"],
         }
         await self.db.remove_connection(conn_id)
+        self._invalidate_connection(conn)
         self._call_reported_gifs.pop(conn_id, None)
         self._inactivity_tasks.pop(conn_id, None)
         self._clear_rl_state(channel_a)
@@ -637,7 +693,7 @@ class Phonebooth(commands.Cog):
         # ── Ban check + config fetch in parallel ──────────────────────────────
         is_banned, cfg = await asyncio.gather(
             self.db.is_user_banned(message.author.id),
-            self.db.get_config_by_channel(message.channel.id),
+            self._get_config_by_channel_cached(message.channel.id),
         )
         if is_banned:
             try:
@@ -840,6 +896,7 @@ class Phonebooth(commands.Cog):
                 pass
             return
 
+        conn["msg_count"] = int(conn.get("msg_count", 0)) + 1
         asyncio.create_task(self.db.increment_message_count(conn["id"]))
         # Reset inactivity timer — someone is talking
         self._reset_inactivity(conn["id"], conn["channel_a"], conn["channel_b"])
@@ -930,7 +987,7 @@ class Phonebooth(commands.Cog):
         ctx = await self.bot.get_context(message)
         if ctx.valid:
             return
-        conn = await self.db.get_connection(message.channel.id)
+        conn = await self._get_connection_cached(message.channel.id)
         if not conn:
             return
         await self._relay(message, conn)
@@ -944,8 +1001,8 @@ class Phonebooth(commands.Cog):
         """Dial into the queue, or connect instantly."""
         is_banned, cfg, conn, room_member, q = await asyncio.gather(
             self.db.is_user_banned(ctx.author.id),
-            self.db.get_config_by_channel(ctx.channel.id),
-            self.db.get_connection(ctx.channel.id),
+            self._get_config_by_channel_cached(ctx.channel.id),
+            self._get_connection_cached(ctx.channel.id),
             self.db.get_room_member(ctx.channel.id),
             self.db.get_queue_entry(ctx.channel.id),
         )
@@ -955,7 +1012,7 @@ class Phonebooth(commands.Cog):
             return
 
         if not cfg:
-            guild_cfg = await self.db.get_guild_config(ctx.guild.id)
+            guild_cfg = await self._get_guild_config_cached(ctx.guild.id)
             if guild_cfg:
                 pb_ch = self.bot.get_channel(guild_cfg["channel_id"])
                 await ctx.send(f"❌ Use the Fliphone channel: {pb_ch.mention if pb_ch else '#deleted-channel'}")
@@ -983,10 +1040,24 @@ class Phonebooth(commands.Cog):
             self._cancel_timeout(match["channel_id"])
             self._cancel_queue_nudge(match["channel_id"])
             await self.db.remove_from_queue(match["channel_id"])
-            await self.db.create_connection(
+            started_at = datetime.utcnow().isoformat()
+            conn_id = await self.db.create_connection(
                 channel_a=ctx.channel.id, guild_a=ctx.guild.id, webhook_a=wh_url,
                 channel_b=match["channel_id"], guild_b=match["guild_id"], webhook_b=match["webhook_url"],
+                started_at=started_at,
             )
+            new_conn = {
+                "id": conn_id,
+                "channel_a": ctx.channel.id,
+                "guild_a": ctx.guild.id,
+                "webhook_a": wh_url,
+                "channel_b": match["channel_id"],
+                "guild_b": match["guild_id"],
+                "webhook_b": match["webhook_url"],
+                "started_at": started_at,
+                "msg_count": 0,
+            }
+            self._cache_connection(new_conn)
             await ctx.send(_CONNECTED_MSG)
             partner_channel = self.bot.get_channel(match["channel_id"])
             if partner_channel:
@@ -1001,12 +1072,10 @@ class Phonebooth(commands.Cog):
                 guild_b_id=match["guild_id"],
             )
             # Start inactivity timer for this call
-            new_conn = await self.db.get_connection(ctx.channel.id)
-            if new_conn:
-                self._reset_inactivity(new_conn["id"], ctx.channel.id, match["channel_id"])
+            self._reset_inactivity(conn_id, ctx.channel.id, match["channel_id"])
             # Anon mode notifications
-            caller_cfg  = await self.db.get_config_by_channel(ctx.channel.id)
-            partner_cfg = await self.db.get_config_by_channel(match["channel_id"])
+            caller_cfg  = cfg
+            partner_cfg = await self._get_config_by_channel_cached(match["channel_id"])
             caller_anon  = caller_cfg.get("anonymous", 0) if caller_cfg else 0
             partner_anon = partner_cfg.get("anonymous", 0) if partner_cfg else 0
             if caller_anon:
@@ -1024,6 +1093,7 @@ class Phonebooth(commands.Cog):
                 except discord.HTTPException:
                     pass
         else:
+            search_msg = await ctx.send("📳 **Searching for someone to talk to...**")
             await self.db.add_to_queue(
                 channel_id=ctx.channel.id, guild_id=ctx.guild.id,
                 user_id=ctx.author.id, webhook_url=wh_url,
@@ -1034,10 +1104,12 @@ class Phonebooth(commands.Cog):
                 self.db.get_queue_size(),
                 self.db.get_active_connection_count(),
             )
-            await ctx.send(
+            await search_msg.edit(
+                content=(
                 f"📳 **Searching for someone to talk to...** ({queue_size} waiting, {active} active calls)\n"
                 f"Estimated wait: **instant if someone dials, otherwise up to {config.QUEUE_TIMEOUT} min**.\n"
                 f"Use `f.hangup` to cancel. Auto-cancels in {config.QUEUE_TIMEOUT} min."
+                )
             )
             # Notify opted-in subscribers that someone is waiting
             asyncio.create_task(self._fire_notify(ctx.author.id))
@@ -1056,7 +1128,7 @@ class Phonebooth(commands.Cog):
             await ctx.send("📵 Left the queue. Use `f.call` to dial again.")
             return
 
-        conn = await self.db.get_connection(ctx.channel.id)
+        conn = await self._get_connection_cached(ctx.channel.id)
         if not conn:
             await ctx.send("📵 Not in a call or queue. Use `f.call` to connect!")
             return
@@ -1083,6 +1155,7 @@ class Phonebooth(commands.Cog):
             "conn_id": conn["id"],
         }
         await self.db.remove_connection(conn_id, ended_by=ctx.author.id)
+        self._invalidate_connection(conn)
         self._call_reported_gifs.pop(conn_id, None)
         self._cancel_inactivity(conn_id)
         self._clear_rl_state(conn["channel_a"])
@@ -1114,12 +1187,12 @@ class Phonebooth(commands.Cog):
     @commands.cooldown(1, 5, commands.BucketType.channel)
     async def skip(self, ctx: commands.Context) -> None:
         """End the current call and immediately search for a new one."""
-        cfg = await self.db.get_config_by_channel(ctx.channel.id)
+        cfg = await self._get_config_by_channel_cached(ctx.channel.id)
         if not cfg:
             await ctx.send("❌ This isn't a Fliphone channel.")
             return
 
-        conn = await self.db.get_connection(ctx.channel.id)
+        conn = await self._get_connection_cached(ctx.channel.id)
         if conn:
             other_cid = conn["channel_b"] if ctx.channel.id == conn["channel_a"] else conn["channel_a"]
             skip_conn_id = conn["id"]
@@ -1141,6 +1214,7 @@ class Phonebooth(commands.Cog):
                 "conn_id": conn["id"],
             }
             await self.db.remove_connection(skip_conn_id, ended_by=ctx.author.id)
+            self._invalidate_connection(conn)
             self._call_reported_gifs.pop(skip_conn_id, None)
             self._cancel_inactivity(skip_conn_id)
             self._clear_rl_state(conn["channel_a"])
@@ -1164,17 +1238,31 @@ class Phonebooth(commands.Cog):
 
         await ctx.send("⏭️ you have skipped this caller.")
 
-        wh_url = await self.get_or_create_webhook(ctx.channel)
+        wh_url = cfg.get("webhook_url") or await self.get_or_create_webhook(ctx.channel)
         match  = await self.db.get_queue_match(ctx.guild.id, ctx.channel.id)
 
         if match:
             self._cancel_timeout(match["channel_id"])
             self._cancel_queue_nudge(match["channel_id"])
             await self.db.remove_from_queue(match["channel_id"])
-            await self.db.create_connection(
+            started_at = datetime.utcnow().isoformat()
+            conn_id = await self.db.create_connection(
                 channel_a=ctx.channel.id, guild_a=ctx.guild.id, webhook_a=wh_url,
                 channel_b=match["channel_id"], guild_b=match["guild_id"], webhook_b=match["webhook_url"],
+                started_at=started_at,
             )
+            new_conn = {
+                "id": conn_id,
+                "channel_a": ctx.channel.id,
+                "guild_a": ctx.guild.id,
+                "webhook_a": wh_url,
+                "channel_b": match["channel_id"],
+                "guild_b": match["guild_id"],
+                "webhook_b": match["webhook_url"],
+                "started_at": started_at,
+                "msg_count": 0,
+            }
+            self._cache_connection(new_conn)
             await ctx.send(_CONNECTED_MSG)
             partner_channel = self.bot.get_channel(match["channel_id"])
             if partner_channel:
@@ -1188,9 +1276,7 @@ class Phonebooth(commands.Cog):
                 channel_b=partner_channel,
                 guild_b_id=match["guild_id"],
             )
-            new_conn2 = await self.db.get_connection(ctx.channel.id)
-            if new_conn2:
-                self._reset_inactivity(new_conn2["id"], ctx.channel.id, match["channel_id"])
+            self._reset_inactivity(conn_id, ctx.channel.id, match["channel_id"])
         else:
             await self.db.add_to_queue(
                 channel_id=ctx.channel.id, guild_id=ctx.guild.id,
@@ -1211,7 +1297,7 @@ class Phonebooth(commands.Cog):
     @commands.guild_only()
     async def status(self, ctx: commands.Context) -> None:
         """Show the current Fliphone status for this channel."""
-        conn = await self.db.get_connection(ctx.channel.id)
+        conn = await self._get_connection_cached(ctx.channel.id)
         if conn:
             is_a      = ctx.channel.id == conn["channel_a"]
             other_gid = conn["guild_b"] if is_a else conn["guild_a"]
@@ -1228,9 +1314,10 @@ class Phonebooth(commands.Cog):
 
         q = await self.db.get_queue_entry(ctx.channel.id)
         if q:
+            queue_size = await self.db.get_queue_size()
             embed = discord.Embed(
                 title="⏳ Waiting in Queue",
-                description=f"**Wait time:** {_duration_str(q['joined_at'])}\n**Queue size:** {await self.db.get_queue_size()}",
+                description=f"**Wait time:** {_duration_str(q['joined_at'])}\n**Queue size:** {queue_size}",
                 color=config.COLOR_WAIT,
             )
             embed.set_footer(text=config.FOOTER)
@@ -1238,9 +1325,14 @@ class Phonebooth(commands.Cog):
             return
 
         embed = discord.Embed(title="📴 Idle", description="Not connected. Use `f.call` to connect!", color=config.COLOR_WAIT)
-        embed.add_field(name="Active Calls",   value=str(await self.db.get_active_connection_count()), inline=True)
-        embed.add_field(name="In Queue",       value=str(await self.db.get_queue_size()),              inline=True)
-        embed.add_field(name="All-Time Calls", value=str(await self.db.get_total_calls()),             inline=True)
+        active_calls, queue_size, total_calls = await asyncio.gather(
+            self.db.get_active_connection_count(),
+            self.db.get_queue_size(),
+            self.db.get_total_calls(),
+        )
+        embed.add_field(name="Active Calls",   value=str(active_calls), inline=True)
+        embed.add_field(name="In Queue",       value=str(queue_size),   inline=True)
+        embed.add_field(name="All-Time Calls", value=str(total_calls),  inline=True)
         embed.set_footer(text=config.FOOTER)
         await ctx.send(embed=embed)
 
@@ -1250,7 +1342,7 @@ class Phonebooth(commands.Cog):
     @commands.guild_only()
     async def block(self, ctx: commands.Context) -> None:
         """Block the server you're currently connected to."""
-        conn = await self.db.get_connection(ctx.channel.id)
+        conn = await self._get_connection_cached(ctx.channel.id)
         if not conn:
             await ctx.send("❌ You can only block a server while in an active call.")
             return
@@ -1281,6 +1373,7 @@ class Phonebooth(commands.Cog):
             "conn_id": conn["id"],
         }
         await self.db.remove_connection(block_conn_id, ended_by=ctx.author.id)
+        self._invalidate_connection(conn)
         self._call_reported_gifs.pop(block_conn_id, None)
         self._cancel_inactivity(block_conn_id)
         self._clear_rl_state(conn["channel_a"])
@@ -1361,8 +1454,8 @@ class Phonebooth(commands.Cog):
 
         if ctx.guild:
             guild_cfg, conn, q, room_member = await asyncio.gather(
-                self.db.get_guild_config(ctx.guild.id),
-                self.db.get_connection(ctx.channel.id),
+                self._get_guild_config_cached(ctx.guild.id),
+                self._get_connection_cached(ctx.channel.id),
                 self.db.get_queue_entry(ctx.channel.id),
                 self.db.get_room_member(ctx.channel.id),
             )
@@ -1434,12 +1527,15 @@ class Phonebooth(commands.Cog):
     async def anon(self, ctx: commands.Context) -> None:
         """Toggle anonymous mode for this server. Anyone in the phonebooth channel can use this."""
         # Check this is a configured phonebooth channel
-        cfg = await self.db.get_config_by_channel(ctx.channel.id)
-        guild_cfg = await self.db.get_guild_config(ctx.guild.id)
+        cfg, guild_cfg = await asyncio.gather(
+            self._get_config_by_channel_cached(ctx.channel.id),
+            self._get_guild_config_cached(ctx.guild.id),
+        )
         if not cfg and not guild_cfg:
             await ctx.send("❌ Fliphone isn't set up. An admin should run `f.setup` first.")
             return
         is_anon = await self.db.toggle_anonymous(ctx.guild.id)
+        self._invalidate_config(guild_id=ctx.guild.id, channel_id=ctx.channel.id)
         if is_anon:
             await ctx.send("🎭 **Anonymous mode ON** — messages from this server will appear as *Stranger [Name]*.")
         else:
@@ -1454,7 +1550,7 @@ class Phonebooth(commands.Cog):
         if not await self._check_gif_admin(ctx):
             return
 
-        guild_cfg = await self.db.get_guild_config(ctx.guild.id)
+        guild_cfg = await self._get_guild_config_cached(ctx.guild.id)
         if not guild_cfg:
             await ctx.send("❌ Fliphone isn't set up. An admin should run `f.setup` first.")
             return
@@ -1481,7 +1577,7 @@ class Phonebooth(commands.Cog):
     @commands.guild_only()
     async def friendrequest(self, ctx: commands.Context) -> None:
         """Share your Discord username with the person you're talking to."""
-        conn = await self.db.get_connection(ctx.channel.id)
+        conn = await self._get_connection_cached(ctx.channel.id)
         if not conn:
             await ctx.send("❌ You can only share your friend request info during an active call.")
             return

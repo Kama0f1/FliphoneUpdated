@@ -570,14 +570,24 @@ class Database:
     async def get_queue_size(self) -> int:
         return int(await self._fetchval("SELECT COUNT(*) FROM queue") or 0)
 
-    async def create_connection(self, channel_a, guild_a, webhook_a, channel_b, guild_b, webhook_b) -> int:
+    async def create_connection(
+        self,
+        channel_a,
+        guild_a,
+        webhook_a,
+        channel_b,
+        guild_b,
+        webhook_b,
+        started_at: Optional[str] = None,
+    ) -> int:
+        started_at = started_at or datetime.utcnow().isoformat()
         return await self._insert_returning_id(
             """
             INSERT INTO connections
                 (channel_a, guild_a, webhook_a, channel_b, guild_b, webhook_b, started_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (channel_a, guild_a, webhook_a, channel_b, guild_b, webhook_b, datetime.utcnow().isoformat()),
+            (channel_a, guild_a, webhook_a, channel_b, guild_b, webhook_b, started_at),
         )
 
     async def get_connection(self, channel_id: int) -> Optional[dict]:

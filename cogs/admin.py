@@ -302,6 +302,8 @@ class Admin(commands.Cog, name="Admin"):
             webhook_url=webhook_url,
             user_id=user.id,
         )
+        if pb_cog and hasattr(pb_cog, "_invalidate_config"):
+            pb_cog._invalidate_config(guild_id=guild.id, channel_id=old_channel_id)
 
         embed = discord.Embed(title="Setup Repaired", color=config.COLOR_OK, timestamp=datetime.utcnow())
         embed.add_field(name="Channel", value=target.mention, inline=True)
@@ -337,6 +339,8 @@ class Admin(commands.Cog, name="Admin"):
             guild_id=ctx.guild.id, channel_id=target.id,
             webhook_url=wh_url, user_id=ctx.author.id,
         )
+        if pb_cog and hasattr(pb_cog, "_invalidate_config"):
+            pb_cog._invalidate_config(guild_id=ctx.guild.id, channel_id=target.id)
 
         wh_note = "✅ Webhook relay active" if wh_url else "⚠️ No webhook (grant Manage Webhooks for better relay)"
         await ctx.send(
@@ -459,6 +463,9 @@ class Admin(commands.Cog, name="Admin"):
         if conn:
             other_cid = conn["channel_b"] if ch_id == conn["channel_a"] else conn["channel_a"]
             await self.db.remove_connection(conn["id"])
+            pb_cog = self.bot.get_cog("Phonebooth")
+            if pb_cog and hasattr(pb_cog, "_invalidate_connection"):
+                pb_cog._invalidate_connection(conn)
             other_ch = self.bot.get_channel(other_cid)
             if other_ch:
                 try:
@@ -478,6 +485,9 @@ class Admin(commands.Cog, name="Admin"):
             pass
 
         await self.db.delete_guild(ctx.guild.id)
+        pb_cog = self.bot.get_cog("Phonebooth")
+        if pb_cog and hasattr(pb_cog, "_invalidate_config"):
+            pb_cog._invalidate_config(guild_id=ctx.guild.id, channel_id=ch_id)
         await ctx.send("📵 Fliphone removed. Run `f.setup` to set it up again.")
 
     # ── f.stats ───────────────────────────────────────────────────────────────
@@ -600,6 +610,9 @@ class Admin(commands.Cog, name="Admin"):
         ch_id     = guild_cfg["channel_id"]
         other_cid = conn["channel_b"] if ch_id == conn["channel_a"] else conn["channel_a"]
         await self.db.remove_connection(conn["id"], ended_by=ctx.author.id)
+        pb_cog = self.bot.get_cog("Phonebooth")
+        if pb_cog and hasattr(pb_cog, "_invalidate_connection"):
+            pb_cog._invalidate_connection(conn)
         await ctx.send("📵 Call force-disconnected by admin.")
 
         other_ch = self.bot.get_channel(other_cid)
