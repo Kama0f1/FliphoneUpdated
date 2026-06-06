@@ -75,6 +75,12 @@ def _get_avatar_url(member: discord.Member | discord.User) -> str:
             return str(member.default_avatar.url)
 
 
+def _relay_display_name(member: object) -> str:
+    name = getattr(member, "display_name", None) or getattr(member, "name", "User")
+    filtered_name, _ = filter_message(str(name))
+    return filtered_name.strip()[:80] or "User"
+
+
 def _render_user_mentions(text: str, guild: discord.Guild | None) -> str:
     if not text or guild is None:
         return text
@@ -82,7 +88,7 @@ def _render_user_mentions(text: str, guild: discord.Guild | None) -> str:
     def _replace(match: re.Match[str]) -> str:
         member = guild.get_member(int(match.group(1)))
         if member:
-            return f"@{member.name}"
+            return f"@{_relay_display_name(member)}"
         return "@user"
 
     return MENTION_PATTERN.sub(_replace, text)
@@ -734,7 +740,7 @@ class Phonebooth(commands.Cog):
             display_name, avatar_url = _anon_identity(seed)
         else:
             member       = message.author
-            display_name = member.name
+            display_name = _relay_display_name(member)
             avatar_url = _get_avatar_url(member)
 
         # ── Reply context embed ───────────────────────────────────────────────
@@ -743,7 +749,7 @@ class Phonebooth(commands.Cog):
         if message.reference:
             ref_msg = message.reference.resolved
             if isinstance(ref_msg, discord.Message):
-                ref_author = ref_msg.author.name
+                ref_author = _relay_display_name(ref_msg.author)
                 # For relayed webhook messages, display_avatar IS the user's pfp
                 # because we update the webhook avatar on every send.
                 # For regular messages use the normal helper.
@@ -1439,12 +1445,12 @@ class Phonebooth(commands.Cog):
         )
 
         embed = discord.Embed(
-            title=f"{ctx.author.name} - Fliphone Profile",
+            title=f"{_relay_display_name(ctx.author)} - Fliphone Profile",
             description="Your current Fliphone settings and channel status.",
             color=config.COLOR_ERR if is_banned else config.COLOR_WAIT,
             timestamp=datetime.utcnow(),
         )
-        embed.set_author(name=str(ctx.author), icon_url=_get_avatar_url(ctx.author))
+        embed.set_author(name=_relay_display_name(ctx.author), icon_url=_get_avatar_url(ctx.author))
         embed.set_thumbnail(url=_get_avatar_url(ctx.author))
         embed.add_field(
             name="Account",
@@ -1550,7 +1556,7 @@ class Phonebooth(commands.Cog):
         if is_anon:
             await ctx.send("🎭 **Anonymous mode ON** — messages from this server will appear as *Stranger [Name]*.")
         else:
-            await ctx.send("👤 **Anonymous mode OFF** — messages will show real usernames and avatars.")
+            await ctx.send("👤 **Anonymous mode OFF** — messages will show filtered display names and avatars.")
 
     # ── f.gifmode ────────────────────────────────────────────────────────────
 

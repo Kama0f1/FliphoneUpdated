@@ -102,6 +102,12 @@ def _get_avatar_url(member: discord.Member | discord.User) -> str:
             return str(member.default_avatar.url)
 
 
+def _relay_display_name(member: object) -> str:
+    name = getattr(member, "display_name", None) or getattr(member, "name", "User")
+    filtered_name, _ = filter_message(str(name))
+    return filtered_name.strip()[:80] or "User"
+
+
 def _render_user_mentions(text: str, guild: discord.Guild | None) -> str:
     if not text or guild is None:
         return text
@@ -109,7 +115,7 @@ def _render_user_mentions(text: str, guild: discord.Guild | None) -> str:
     def _replace(match: re.Match[str]) -> str:
         member = guild.get_member(int(match.group(1)))
         if member:
-            return f"@{member.name}"
+            return f"@{_relay_display_name(member)}"
         return "@user"
 
     return MENTION_PATTERN.sub(_replace, text)
@@ -599,7 +605,7 @@ class Room(commands.Cog):
             display_name, avatar_url = _anon_identity(seed)
         else:
             author       = message.author
-            display_name = author.name
+            display_name = _relay_display_name(author)
             avatar_url = _get_avatar_url(author)
 
         # Webhook username always shows station so servers are identifiable.
@@ -611,7 +617,7 @@ class Room(commands.Cog):
         if message.reference:
             ref_msg = message.reference.resolved
             if isinstance(ref_msg, discord.Message):
-                ref_author = ref_msg.author.name
+                ref_author = _relay_display_name(ref_msg.author)
                 try:
                     ref_avatar = str(
                         ref_msg.author.display_avatar.with_static_format("png").with_size(64).url
