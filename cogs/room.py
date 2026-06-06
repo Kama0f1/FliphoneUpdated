@@ -643,8 +643,6 @@ class Room(commands.Cog):
 
         # ── Content filter ────────────────────────────────────────────────────
         raw = message.content or ""
-        if message.stickers:
-            raw = (raw + "\n🎭 *Sticker: " + ", ".join(s.name for s in message.stickers) + "*").strip()
 
         # ── Anti text-wall: check raw content BEFORE filtering ────────────────
         raw_lines = raw.splitlines()
@@ -713,7 +711,7 @@ class Room(commands.Cog):
         # ── Attachments ───────────────────────────────────────────────────────
         GIF_EXT = {".gif"}
         attachment_gif_urls: list[str] = []
-        blocked_attachment_count = 0
+        blocked_attachment_count = len(message.stickers)
 
         for att in message.attachments:
             ext = ("." + att.filename.rsplit(".", 1)[-1].lower()) if "." in att.filename else ""
@@ -726,8 +724,7 @@ class Room(commands.Cog):
         if blocked_attachment_count:
             try:
                 await message.channel.send(
-                    f"⚠️ {message.author.mention} Attachments and voice messages are not allowed in rooms. "
-                    "Use an approved GIF link instead.",
+                    f"⚠️ {message.author.mention} Only text and GIFs are allowed in rooms.",
                     delete_after=8,
                 )
             except discord.HTTPException:

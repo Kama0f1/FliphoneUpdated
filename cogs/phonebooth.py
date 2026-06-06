@@ -776,9 +776,6 @@ class Phonebooth(commands.Cog):
 
         # ── Content ───────────────────────────────────────────────────────────
         raw_content = (message.content or "")
-        if message.stickers:
-            sticker_names = ", ".join(s.name for s in message.stickers)
-            raw_content = (raw_content + f"\n🎭 *Sticker: {sticker_names}*").strip()
 
         content, was_censored = filter_message(raw_content)
         if was_censored:
@@ -819,7 +816,7 @@ class Phonebooth(commands.Cog):
         GIF_EXT = {".gif"}
         files: list[discord.File] = []
         attachment_gif_urls: list[str] = []
-        blocked_attachment_count = 0
+        blocked_attachment_count = len(message.stickers)
 
         for att in message.attachments:
             ext = ("." + att.filename.rsplit(".", 1)[-1].lower()) if "." in att.filename else ""
@@ -832,8 +829,7 @@ class Phonebooth(commands.Cog):
         if blocked_attachment_count:
             try:
                 await message.channel.send(
-                    f"⚠️ {message.author.mention} Attachments and voice messages are not allowed in calls. "
-                    "Use an approved GIF link instead.",
+                    f"⚠️ {message.author.mention} Only text and GIFs are allowed in calls.",
                     delete_after=8,
                 )
             except discord.HTTPException:

@@ -148,7 +148,7 @@ Server A  ◄──relay──   Bot  ──relay──►  Server B
 - ✅ Text messages (censored through the content filter)
 - ✅ GIFs from Tenor, Giphy, and Klipy (with per-server mode controls)
 - ✅ Replies with context (shows who you're replying to)
-- ✅ Sticker names (stickers themselves can't cross servers, but the name is mentioned)
+- ❌ Stickers and all non-GIF attachments
 - ❌ External links (stripped — only GIF links are allowed)
 - ❌ File, image, video, and audio attachments (blocked for safety)
 - ❌ Custom emoji (they won't render in other servers)
