@@ -201,7 +201,6 @@ class Admin(commands.Cog, name="Admin"):
                 "View Channel": perms.view_channel,
                 "Send Messages": perms.send_messages,
                 "Embed Links": perms.embed_links,
-                "Attach Files": perms.attach_files,
                 "Read Message History": perms.read_message_history,
             }
             missing = [name for name, has_perm in required.items() if not has_perm]
@@ -531,7 +530,6 @@ class Admin(commands.Cog, name="Admin"):
                 "• Send Messages\n"
                 "• Manage Webhooks *(for avatar relay)*\n"
                 "• Embed Links\n"
-                "• Attach Files\n"
                 "• Read Message History"
             ),
             inline=False,

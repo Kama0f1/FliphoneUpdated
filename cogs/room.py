@@ -21,7 +21,6 @@ max of 6.
 from __future__ import annotations
 
 import asyncio
-import io
 import random
 import re
 import time
@@ -110,7 +109,7 @@ def _render_user_mentions(text: str, guild: discord.Guild | None) -> str:
     def _replace(match: re.Match[str]) -> str:
         member = guild.get_member(int(match.group(1)))
         if member:
-            return f"@{member.display_name}"
+            return f"@{member.name}"
         return "@user"
 
     return MENTION_PATTERN.sub(_replace, text)
@@ -600,11 +599,7 @@ class Room(commands.Cog):
             display_name, avatar_url = _anon_identity(seed)
         else:
             author       = message.author
-            display_name = (
-                author.nick
-                if isinstance(author, discord.Member) and author.nick
-                else author.display_name
-            )
+            display_name = author.name
             avatar_url = _get_avatar_url(author)
 
         # Webhook username always shows station so servers are identifiable.
@@ -612,10 +607,11 @@ class Room(commands.Cog):
 
         # ── Reply embed ───────────────────────────────────────────────────────
         reply_embed: Optional[discord.Embed] = None
+        reply_context: Optional[str] = None
         if message.reference:
             ref_msg = message.reference.resolved
             if isinstance(ref_msg, discord.Message):
-                ref_author = ref_msg.author.display_name
+                ref_author = ref_msg.author.name
                 try:
                     ref_avatar = str(
                         ref_msg.author.display_avatar.with_static_format("png").with_size(64).url
@@ -638,6 +634,10 @@ class Room(commands.Cog):
                     else:
                         ref_text = "message"
                 ref_text = _render_user_mentions(ref_text, message.guild)
+                reply_context = (
+                    f"> Replying to **{discord.utils.escape_markdown(ref_author)}**: "
+                    f"{discord.utils.escape_markdown(ref_text)}"
+                )
                 reply_embed = discord.Embed(description=ref_text, color=0x5865F2)
                 reply_embed.set_author(name=f"Replying to {ref_author}", icon_url=ref_avatar)
 
@@ -711,26 +711,27 @@ class Room(commands.Cog):
                 pass
 
         # ── Attachments ───────────────────────────────────────────────────────
-        GIF_EXT    = {".gif"}
-        BLOCK_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".mp4", ".mov", ".webm", ".avi", ".mkv"}
-        file_bytes: list[tuple[bytes, str]] = []   # (data, filename)
-        total_bytes = 0
-        LIMIT = 8_000_000
+        GIF_EXT = {".gif"}
         attachment_gif_urls: list[str] = []
+        blocked_attachment_count = 0
 
         for att in message.attachments:
             ext = ("." + att.filename.rsplit(".", 1)[-1].lower()) if "." in att.filename else ""
             if ext in GIF_EXT:
                 content += f"\n{att.url}"
                 attachment_gif_urls.append(att.url)
-            elif ext in BLOCK_EXTS:
-                pass  # images/videos blocked in rooms same as 1:1 calls
-            elif total_bytes + att.size <= LIMIT:
-                try:
-                    file_bytes.append((await att.read(), att.filename))
-                    total_bytes += att.size
-                except Exception:
-                    pass
+            else:
+                blocked_attachment_count += 1
+
+        if blocked_attachment_count:
+            try:
+                await message.channel.send(
+                    f"⚠️ {message.author.mention} Attachments and voice messages are not allowed in rooms. "
+                    "Use an approved GIF link instead.",
+                    delete_after=8,
+                )
+            except discord.HTTPException:
+                pass
 
         # Deduplicate GIFs
         def _norm(u: str) -> str:
@@ -764,6 +765,9 @@ class Room(commands.Cog):
                     )
                 except discord.HTTPException:
                     pass
+
+        if not content.strip() and not all_gif_urls:
+            return
 
         # ── Counters + inactivity reset ───────────────────────────────────────
         await self.db.increment_room_msg_count(room["id"])
@@ -813,12 +817,17 @@ class Room(commands.Cog):
                 recipient_gif_urls = safe_urls
 
             recipient_text_content = recipient_content.strip() or None
+            recipient_reply_embed = reply_embed
+            if recipient_gif_urls and reply_embed:
+                recipient_text_content = "\n".join(
+                    part for part in (reply_context, recipient_text_content) if part
+                )
+                recipient_reply_embed = None
 
-            # Fresh file copies for each recipient (file pointers are single-use)
-            send_files = [
-                discord.File(io.BytesIO(data), filename=fname)
-                for data, fname in file_bytes
-            ]
+            if not recipient_text_content:
+                continue
+
+            send_files: list[discord.File] = []
 
             sent_msg_id: Optional[int] = None
 
@@ -829,7 +838,7 @@ class Room(commands.Cog):
                     webhook_name,
                     avatar_url,
                     send_files,
-                    embed=reply_embed,
+                    embed=recipient_reply_embed,
                     wait=bool(recipient_gif_urls),
                     silent=bool(recipient_gif_urls),
                 )
@@ -840,7 +849,7 @@ class Room(commands.Cog):
                 try:
                     sent = await other_ch.send(
                         content=f"**{webhook_name}**\n{body}" if body else f"**{webhook_name}**",
-                        embed=reply_embed if reply_embed else discord.utils.MISSING,
+                        embed=recipient_reply_embed if recipient_reply_embed else discord.utils.MISSING,
                         files=send_files if send_files else discord.utils.MISSING,
                         allowed_mentions=discord.AllowedMentions.none(),
                         silent=bool(recipient_gif_urls),

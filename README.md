@@ -20,7 +20,7 @@ Messages are relayed in real time. Fliphone **never stores message content.**
 
 - **1-on-1 calls** — matched instantly when someone is waiting, or queued for up to 10 minutes
 - **Group rooms** — up to 6 servers in one room, identified by NATO station names
-- **Webhook relay** — messages appear with the sender's real name and avatar (when bot has Manage Webhooks)
+- **Webhook relay** — messages appear with the sender's username and avatar (when bot has Manage Webhooks)
 - **Anonymous mode** — senders appear as *Stranger [NATO word]* with a robot avatar
 - **GIF moderation** — built-in report system with blacklist/whitelist management
 - **Content filter** — automatic censorship of slurs and harmful language
@@ -45,7 +45,6 @@ Messages are relayed in real time. Fliphone **never stores message content.**
 | Send Messages | Sending relay messages and status embeds |
 | Manage Webhooks | ⭐ Seamless relay with real avatars/names |
 | Embed Links | All status and help embeds |
-| Attach Files | Relaying file attachments |
 | Read Message History | Webhook lookup and reply context |
 | Add Reactions | Future feature support |
 
@@ -141,7 +140,7 @@ Server A  ◄──relay──   Bot  ──relay──►  Server B
 
 ### Relay priority
 
-1. **Webhook relay** (if bot has Manage Webhooks) — message appears with the sender's real name and avatar, no bot prefix clutter.
+1. **Webhook relay** (if bot has Manage Webhooks) — message appears with the sender's username and avatar, no bot prefix clutter.
 2. **Fallback plain message** — if webhooks aren't available, the bot sends `**Name**\nmessage`.
 
 ### What gets relayed
@@ -151,7 +150,7 @@ Server A  ◄──relay──   Bot  ──relay──►  Server B
 - ✅ Replies with context (shows who you're replying to)
 - ✅ Sticker names (stickers themselves can't cross servers, but the name is mentioned)
 - ❌ External links (stripped — only GIF links are allowed)
-- ❌ Images and video attachments (blocked for safety)
+- ❌ File, image, video, and audio attachments (blocked for safety)
 - ❌ Custom emoji (they won't render in other servers)
 
 ---

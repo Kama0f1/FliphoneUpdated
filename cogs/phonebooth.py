@@ -15,7 +15,6 @@ f.fr              – Share your username as a friend request card
 from __future__ import annotations
 
 import asyncio
-import io
 import random
 import re
 import time
@@ -83,7 +82,7 @@ def _render_user_mentions(text: str, guild: discord.Guild | None) -> str:
     def _replace(match: re.Match[str]) -> str:
         member = guild.get_member(int(match.group(1)))
         if member:
-            return f"@{member.display_name}"
+            return f"@{member.name}"
         return "@user"
 
     return MENTION_PATTERN.sub(_replace, text)
@@ -735,19 +734,16 @@ class Phonebooth(commands.Cog):
             display_name, avatar_url = _anon_identity(seed)
         else:
             member       = message.author
-            display_name = (
-                member.nick
-                if isinstance(member, discord.Member) and member.nick
-                else member.display_name
-            )
+            display_name = member.name
             avatar_url = _get_avatar_url(member)
 
         # ── Reply context embed ───────────────────────────────────────────────
         reply_embed: Optional[discord.Embed] = None
+        reply_context: Optional[str] = None
         if message.reference:
             ref_msg = message.reference.resolved
             if isinstance(ref_msg, discord.Message):
-                ref_author = ref_msg.author.display_name
+                ref_author = ref_msg.author.name
                 # For relayed webhook messages, display_avatar IS the user's pfp
                 # because we update the webhook avatar on every send.
                 # For regular messages use the normal helper.
@@ -771,6 +767,10 @@ class Phonebooth(commands.Cog):
                         ref_text = "message"
                 embed_color = random.randint(0x100000, 0xFFFFFF)
                 ref_text = _render_user_mentions(ref_text, message.guild)
+                reply_context = (
+                    f"> Replying to **{discord.utils.escape_markdown(ref_author)}**: "
+                    f"{discord.utils.escape_markdown(ref_text)}"
+                )
                 reply_embed = discord.Embed(description=ref_text, color=embed_color)
                 reply_embed.set_author(name=f"Replying to {ref_author}", icon_url=ref_avatar)
 
@@ -816,30 +816,28 @@ class Phonebooth(commands.Cog):
         inline_gif_urls: list[str] = GIF_LINK_PATTERN.findall(content)
 
         # ── Attachments ───────────────────────────────────────────────────────
-        GIF_EXT    = {".gif"}
-        BLOCK_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".mp4", ".mov", ".webm", ".avi", ".mkv"}
-        VIDEO_EXTS: set[str] = set()  # videos now blocked like images
+        GIF_EXT = {".gif"}
         files: list[discord.File] = []
-        total_bytes = 0
-        LIMIT = 8_000_000
         attachment_gif_urls: list[str] = []
+        blocked_attachment_count = 0
 
         for att in message.attachments:
             ext = ("." + att.filename.rsplit(".", 1)[-1].lower()) if "." in att.filename else ""
             if ext in GIF_EXT:
                 content += f"\n{att.url}"
                 attachment_gif_urls.append(att.url)
-            elif ext in VIDEO_EXTS:
-                pass  # videos blocked
-            elif ext in BLOCK_EXTS:
+            else:
+                blocked_attachment_count += 1
+
+        if blocked_attachment_count:
+            try:
+                await message.channel.send(
+                    f"⚠️ {message.author.mention} Attachments and voice messages are not allowed in calls. "
+                    "Use an approved GIF link instead.",
+                    delete_after=8,
+                )
+            except discord.HTTPException:
                 pass
-            elif total_bytes + att.size <= LIMIT:
-                try:
-                    data = await att.read()
-                    files.append(discord.File(io.BytesIO(data), filename=att.filename))
-                    total_bytes += att.size
-                except Exception:
-                    pass
 
         # ── All GIF URLs (inline + attachments) — deduplicate by stripped URL ──
         def _norm_dedup(u: str) -> str:
@@ -898,24 +896,23 @@ class Phonebooth(commands.Cog):
         # GIFs that are not blocked — these get report cards
         reportable_gif_urls = [u for u in all_gif_urls if u not in blocked_urls]
 
-        # ── Separate GIFs from text when there's a reply embed ────────────────
-        gif_content  = "\n".join(reportable_gif_urls)
+        # Keep GIF replies in one webhook message so reply context stays attached.
         if reply_embed and reportable_gif_urls:
-            text_content = "\n".join(
-                l for l in content.splitlines() if l not in reportable_gif_urls
-            ).strip() or None
+            text_content = "\n".join(part for part in (reply_context, content.strip()) if part)
+            reply_embed = None
         else:
             text_content = content.strip() or None
 
         # ── Check if message is now empty ───────────────────────────────────
-        if not text_content and not files and not reply_embed:
-            try:
-                await message.channel.send(
-                    f"⚠️ {message.author.mention} Your message was not sent because it only contained GIFs which are blocked by the recipient's settings.",
-                    delete_after=8,
-                )
-            except Exception:
-                pass
+        if not text_content and not files:
+            if not blocked_attachment_count:
+                try:
+                    await message.channel.send(
+                        f"⚠️ {message.author.mention} Your message was not sent because it contained no relayable content.",
+                        delete_after=8,
+                    )
+                except Exception:
+                    pass
             return
 
         conn["msg_count"] = int(conn.get("msg_count", 0)) + 1
@@ -932,7 +929,6 @@ class Phonebooth(commands.Cog):
                 conn_id=conn["id"],
                 user_id=message.author.id,
                 username=str(message.author),
-                display_name=message.author.display_name,
                 guild_id=message.guild.id,
                 guild_name=message.guild.name,
             )
@@ -956,14 +952,6 @@ class Phonebooth(commands.Cog):
                         reply_embed=reply_embed, wait=need_id, silent=bool(reportable_gif_urls),
                     )
             if main_wh_msg:
-                # Send GIFs separately when there's a reply embed so Discord embeds them
-                gif_wh_msg = None
-                if reportable_gif_urls and reply_embed:
-                    gif_wh_msg = await self._send_webhook(
-                        target_wh, gif_content, display_name, avatar_url, [],
-                        reply_embed=None, wait=True, silent=True,
-                    )
-
                 # GIF report cards
                 if reportable_gif_urls:
                     target_ch = self.bot.get_channel(target_cid)
@@ -972,7 +960,7 @@ class Phonebooth(commands.Cog):
                             _send_gif_report_card(
                                 target_ch,
                                 gif_url,
-                                gif_wh_msg.id if gif_wh_msg else main_wh_msg.id,
+                                main_wh_msg.id,
                             )
                             for gif_url in reportable_gif_urls
                         ]
@@ -994,12 +982,6 @@ class Phonebooth(commands.Cog):
                 allowed_mentions=discord.AllowedMentions.none(),
                 silent=bool(reportable_gif_urls),
             )
-            if reportable_gif_urls and reply_embed:
-                await target_channel.send(
-                    content=gif_content,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                    silent=True,
-                )
             report_tasks = [
                 _send_gif_report_card(target_channel, gif_url, None)
                 for gif_url in reportable_gif_urls
@@ -1461,7 +1443,7 @@ class Phonebooth(commands.Cog):
         )
 
         embed = discord.Embed(
-            title=f"{ctx.author.display_name} - Fliphone Profile",
+            title=f"{ctx.author.name} - Fliphone Profile",
             description="Your current Fliphone settings and channel status.",
             color=config.COLOR_ERR if is_banned else config.COLOR_WAIT,
             timestamp=datetime.utcnow(),
@@ -1572,7 +1554,7 @@ class Phonebooth(commands.Cog):
         if is_anon:
             await ctx.send("🎭 **Anonymous mode ON** — messages from this server will appear as *Stranger [Name]*.")
         else:
-            await ctx.send("👤 **Anonymous mode OFF** — messages will show real display names and avatars.")
+            await ctx.send("👤 **Anonymous mode OFF** — messages will show real usernames and avatars.")
 
     # ── f.gifmode ────────────────────────────────────────────────────────────
 
@@ -1631,7 +1613,6 @@ class Phonebooth(commands.Cog):
                 color=0x5865F2,
             )
             embed.add_field(name="Username",     value=f"`{member.name}`",  inline=True)
-            embed.add_field(name="Display Name", value=member.display_name, inline=True)
             embed.set_thumbnail(url=_get_avatar_url(member))
             embed.set_footer(text="Copy the username above to send a friend request.")
             return embed

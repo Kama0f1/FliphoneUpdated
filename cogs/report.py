@@ -10,7 +10,7 @@ f.resolvereport <id>        - Mark a report as resolved [owner + trusted mods]
 How it works
 ------------
 During relay, the bot maintains a rolling log of the last 50 messages per call,
-storing { user_id, username, display_name, guild_id, guild_name, timestamp } for each.
+storing { user_id, username, guild_id, guild_name, timestamp } for each.
 This works for both 1-on-1 calls and group rooms.
 
 When a report is submitted:
@@ -142,7 +142,7 @@ class Report(commands.Cog):
         self.bot = bot
         self.db: Database = bot.db
 
-        # conn_id -> deque of { user_id, username, display_name, guild_id, guild_name, timestamp }
+        # conn_id -> deque of { user_id, username, guild_id, guild_name, timestamp }
         self._message_log: dict[int, collections.deque] = {}
 
         # conn_id -> list snapshot kept briefly after a call ends for post-hangup reports
@@ -155,7 +155,6 @@ class Report(commands.Cog):
         conn_id:      int,
         user_id:      int,
         username:     str,
-        display_name: str,
         guild_id:     int,
         guild_name:   str,
     ) -> None:
@@ -168,7 +167,6 @@ class Report(commands.Cog):
         self._message_log[conn_id].append({
             "user_id":      user_id,
             "username":     username,
-            "display_name": display_name,
             "guild_id":     guild_id,
             "guild_name":   guild_name,
             "timestamp":    datetime.utcnow().isoformat(timespec="seconds"),
@@ -345,7 +343,7 @@ class Report(commands.Cog):
         other_senders = [s for s in senders if s["guild_id"] != guild.id]
         if other_senders:
             sender_lines = [
-                f"<@{s['user_id']}> **@{s['username']}** ({s['display_name']})\n"
+                f"<@{s['user_id']}> **@{s['username']}**\n"
                 f"`{s['user_id']}` — {s['guild_name']} — {s['timestamp']}"
                 for s in other_senders[:10]
             ]
