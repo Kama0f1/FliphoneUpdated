@@ -665,6 +665,7 @@ class Room(commands.Cog):
                         ref_text = "image"
                     else:
                         ref_text = "message"
+                ref_text = CUSTOM_EMOJI_PATTERN.sub("", ref_text).strip()
                 ref_text = _render_user_mentions(ref_text, message.guild)
                 reply_context = (
                     f"> Replying to **{discord.utils.escape_markdown(ref_author)}**: "

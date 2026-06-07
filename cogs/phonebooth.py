@@ -46,6 +46,10 @@ LINK_PATTERN = re.compile(
 
 MENTION_PATTERN = re.compile(r"<@!?(\d+)>")
 
+# Matches custom Discord emojis: <:name:id> and animated <a:name:id>.
+# Regular Unicode/keyboard emojis are plain text and are allowed through.
+CUSTOM_EMOJI_PATTERN = re.compile(r"<a?:[a-zA-Z0-9_]+:[0-9]+>")
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _duration_str(started_at: str) -> str:
@@ -930,6 +934,7 @@ class Phonebooth(commands.Cog):
                     else:
                         ref_text = "message"
                 embed_color = random.randint(0x100000, 0xFFFFFF)
+                ref_text = CUSTOM_EMOJI_PATTERN.sub("", ref_text).strip()
                 ref_text = _render_user_mentions(ref_text, message.guild)
                 reply_context = (
                     f"> Replying to **{discord.utils.escape_markdown(ref_author)}**: "
@@ -952,6 +957,7 @@ class Phonebooth(commands.Cog):
             except discord.HTTPException:
                 pass
 
+        content = CUSTOM_EMOJI_PATTERN.sub("", content).strip()
         content = _render_user_mentions(content, message.guild)
 
         # ── Strip non-GIF links ───────────────────────────────────────────────
