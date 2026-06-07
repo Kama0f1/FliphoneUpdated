@@ -59,7 +59,7 @@ _BLOCKED: list[str] = [
     "grooming",
     "child porn", "cp",
     "loli",
-    "pedo", "paedo",
+    "paedo",
     "pedophile", "paedophile",
 
     # Self-harm / harassment
