@@ -689,13 +689,16 @@ class Admin(commands.Cog, name="Admin"):
     # ── f.censor ──────────────────────────────────────────────────────────────
 
     @commands.command(name="censor")
-    @commands.is_owner()
     async def censor(self, ctx, *, word: str) -> None:
         """
-        [Bot owner only] Add or remove a word from the censor list.
+        [Bot owner + trusted mods] Add or remove a word from the censor list.
         If the word is already censored, it will be removed (toggle).
         Usage: f.censor <word or phrase>
         """
+        if not await self._is_global_mod(ctx.author, ctx.guild):
+            await ctx.send("❌ Only the bot owner and trusted mods can use this command.")
+            return
+
         import filter as flt
         word = word.lower().strip()
         current = await self.db.get_custom_words()
@@ -725,9 +728,12 @@ class Admin(commands.Cog, name="Admin"):
             )
 
     @commands.command(name="censorlist")
-    @commands.is_owner()
     async def censorlist(self, ctx) -> None:
-        """[Bot owner only] List all custom censored words."""
+        """[Bot owner + trusted mods] List all custom censored words."""
+        if not await self._is_global_mod(ctx.author, ctx.guild):
+            await ctx.send("❌ Only the bot owner and trusted mods can use this command.")
+            return
+
         import filter as flt
         words = await self.db.get_custom_words()
         hardcoded_count = len(flt._BLOCKED)
