@@ -262,6 +262,7 @@ class Room(commands.Cog):
         self._kick_cooldowns:   dict[int, float]        = {}
         # Active vote-kicks: room_id → VoteKickState
         self._active_votekicks: dict[int, VoteKickState] = {}
+        self._broken_webhook_notified: set[int] = set()
 
     def cog_unload(self) -> None:
         for t in self._inactivity_tasks.values():
@@ -500,6 +501,34 @@ class Room(commands.Cog):
             print(f"[room-webhook] {exc}")
             return None
 
+    async def ensure_relay_webhook(
+        self,
+        channel: discord.TextChannel,
+    ) -> tuple[Optional[str], list[str]]:
+        phonebooth = self.bot.get_cog("Phonebooth")
+        if phonebooth and hasattr(phonebooth, "ensure_relay_webhook"):
+            return await phonebooth.ensure_relay_webhook(channel)
+
+        bot_member = channel.guild.me
+        if bot_member is None:
+            return None, ["Bot member unavailable"]
+        perms = channel.permissions_for(bot_member)
+        required = (
+            ("View Channel", perms.view_channel),
+            ("Send Messages", perms.send_messages),
+            ("Embed Links", perms.embed_links),
+            ("Read Message History", perms.read_message_history),
+            ("Manage Webhooks", perms.manage_webhooks),
+        )
+        issues = [name for name, allowed in required if not allowed]
+        if issues:
+            return None, issues
+        webhook_url = await self.get_or_create_webhook(channel)
+        if not webhook_url:
+            return None, ["Webhook access failed"]
+        await self.db.update_webhook(channel.id, webhook_url)
+        return webhook_url, []
+
     async def _send_webhook(
         self,
         url: str,
@@ -511,8 +540,8 @@ class Room(commands.Cog):
         embed: Optional[discord.Embed] = None,
         wait: bool = False,
         silent: bool = False,
-    ) -> Optional[discord.WebhookMessage]:
-        """Send via webhook. Returns the WebhookMessage if wait=True, else None."""
+    ) -> discord.WebhookMessage | bool | None:
+        """Send via webhook. Returns the message when requested, otherwise success."""
         try:
             session = getattr(self.bot, "http_session", None)
             _own_session = session is None or session.closed
@@ -533,7 +562,7 @@ class Room(commands.Cog):
             finally:
                 if _own_session:
                     await session.close()
-            return msg if wait else None
+            return msg if wait else True
         except Exception as exc:
             print(f"[room-relay] {exc}")
             return None
@@ -834,32 +863,64 @@ class Room(commands.Cog):
 
             sent_msg_id: Optional[int] = None
 
-            if wh_url:
-                wh_msg = await self._send_webhook(
-                    wh_url,
-                    recipient_text_content,
-                    webhook_name,
-                    avatar_url,
-                    send_files,
-                    embed=recipient_reply_embed,
-                    wait=bool(recipient_gif_urls),
-                    silent=bool(recipient_gif_urls),
-                )
-                if wh_msg:
-                    sent_msg_id = wh_msg.id
-            elif other_ch:
-                body = recipient_text_content or ""
-                try:
-                    sent = await other_ch.send(
-                        content=f"**{webhook_name}**\n{body}" if body else f"**{webhook_name}**",
-                        embed=recipient_reply_embed if recipient_reply_embed else discord.utils.MISSING,
-                        files=send_files if send_files else discord.utils.MISSING,
-                        allowed_mentions=discord.AllowedMentions.none(),
+            if not wh_url and isinstance(other_ch, discord.TextChannel):
+                wh_url, _ = await self.ensure_relay_webhook(other_ch)
+                if wh_url:
+                    other["webhook_url"] = wh_url
+                    await self.db.update_room_member_webhook(other["channel_id"], wh_url)
+
+            if not wh_url:
+                if other_ch and other["channel_id"] not in self._broken_webhook_notified:
+                    try:
+                        await other_ch.send(
+                            "⚠️ Room relay is paused for this server because its webhook is unavailable. "
+                            "An admin must run `f.check`, fix permissions, then run `f.repair`."
+                        )
+                        self._broken_webhook_notified.add(other["channel_id"])
+                    except discord.HTTPException:
+                        pass
+                continue
+
+            wh_msg = await self._send_webhook(
+                wh_url,
+                recipient_text_content,
+                webhook_name,
+                avatar_url,
+                send_files,
+                embed=recipient_reply_embed,
+                wait=bool(recipient_gif_urls),
+                silent=bool(recipient_gif_urls),
+            )
+            if not wh_msg and isinstance(other_ch, discord.TextChannel):
+                repaired_url, _ = await self.ensure_relay_webhook(other_ch)
+                if repaired_url:
+                    wh_url = repaired_url
+                    other["webhook_url"] = repaired_url
+                    await self.db.update_room_member_webhook(other["channel_id"], repaired_url)
+                    wh_msg = await self._send_webhook(
+                        wh_url,
+                        recipient_text_content,
+                        webhook_name,
+                        avatar_url,
+                        send_files,
+                        embed=recipient_reply_embed,
+                        wait=bool(recipient_gif_urls),
                         silent=bool(recipient_gif_urls),
                     )
-                    sent_msg_id = sent.id
-                except discord.HTTPException:
-                    continue
+            if not wh_msg:
+                if other_ch and other["channel_id"] not in self._broken_webhook_notified:
+                    try:
+                        await other_ch.send(
+                            "⚠️ Room relay stopped for this server because webhook repair failed. "
+                            "An admin must run `f.check`, fix permissions, then run `f.repair`."
+                        )
+                        self._broken_webhook_notified.add(other["channel_id"])
+                    except discord.HTTPException:
+                        pass
+                continue
+            self._broken_webhook_notified.discard(other["channel_id"])
+            if isinstance(wh_msg, discord.WebhookMessage):
+                sent_msg_id = wh_msg.id
 
             # ── GIF report cards (batched checks, not one-by-one) ──────────────
             if recipient_gif_urls and other_ch:
@@ -958,7 +1019,17 @@ class Room(commands.Cog):
             )
             return
 
-        wh_url = await self.get_or_create_webhook(ctx.channel)
+        if not isinstance(ctx.channel, discord.TextChannel):
+            await ctx.send("❌ Group rooms require a normal text channel.")
+            return
+        wh_url, permission_issues = await self.ensure_relay_webhook(ctx.channel)
+        if not wh_url:
+            await ctx.send(
+                "❌ Fliphone cannot join a room because webhook relay is unavailable.\n"
+                f"Missing or broken: **{', '.join(permission_issues)}**\n"
+                "A server admin must run `f.check`, fix the listed permissions, then run `f.repair`."
+            )
+            return
 
         # ── Try to slot into an existing room ─────────────────────────────────
         room = await self.db.get_available_room(ctx.guild.id)

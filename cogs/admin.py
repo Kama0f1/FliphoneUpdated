@@ -202,6 +202,7 @@ class Admin(commands.Cog, name="Admin"):
                 "Send Messages": perms.send_messages,
                 "Embed Links": perms.embed_links,
                 "Read Message History": perms.read_message_history,
+                "Manage Webhooks": perms.manage_webhooks,
             }
             missing = [name for name, has_perm in required.items() if not has_perm]
             if missing:
@@ -213,20 +214,21 @@ class Admin(commands.Cog, name="Admin"):
                 ok_lines.append("Manage Webhooks is available.")
                 try:
                     webhooks = await channel.webhooks()
-                    has_bot_webhook = any(wh.user == self.bot.user and wh.name == "Fliphone" for wh in webhooks)
-                    if has_bot_webhook and guild_cfg.get("webhook_url"):
+                    bot_webhook = next(
+                        (wh for wh in webhooks if wh.user == self.bot.user and wh.name == "Fliphone"),
+                        None,
+                    )
+                    stored_url = guild_cfg.get("webhook_url")
+                    if bot_webhook and stored_url == bot_webhook.url:
                         ok_lines.append("Relay webhook is present.")
-                    elif has_bot_webhook:
-                        issues.append("A Fliphone webhook exists, but the stored webhook URL is empty.")
+                    elif bot_webhook:
+                        issues.append("The stored relay webhook is stale. Run `f.repair`.")
                     else:
                         issues.append("No Fliphone webhook found. Run `f.repair`.")
                 except discord.Forbidden:
-                    issues.append("Cannot inspect webhooks. Check role order, then run `f.repair`.")
+                    issues.append("Cannot inspect webhooks. Check channel and role permission overrides, then run `f.repair`.")
                 except discord.HTTPException:
                     issues.append("Discord failed while checking webhooks. Try `f.check` again.")
-            else:
-                issues.append("Manage Webhooks is missing. Relay can fall back to normal messages, but setup may look broken.")
-
         q = await self.db.get_queue_entry(channel_id)
         conn = await self.db.get_connection(channel_id)
         room_member = await self.db.get_room_member(channel_id)
@@ -253,7 +255,10 @@ class Admin(commands.Cog, name="Admin"):
             )
             embed.add_field(
                 name="Next Step",
-                value="Run `f.repair` or press **Repair Setup**. If the configured channel was deleted, run `f.repair #channel`.",
+                value=(
+                    "Grant any missing channel permissions first, then run `f.repair` or press **Repair Setup**. "
+                    "If the configured channel was deleted, run `f.repair #channel`."
+                ),
                 inline=False,
             )
         else:
@@ -280,20 +285,35 @@ class Admin(commands.Cog, name="Admin"):
                 )
             await self.db.remove_from_queue(old_channel_id)
 
-        perms = target.permissions_for(guild.me)
-        if not perms.view_channel or not perms.send_messages:
+        pb_cog = self.bot.get_cog("Phonebooth")
+        permission_issues = (
+            pb_cog.relay_permission_issues(target)
+            if pb_cog and hasattr(pb_cog, "relay_permission_issues")
+            else ["Phonebooth relay unavailable"]
+        )
+        if permission_issues:
             return discord.Embed(
                 title="Repair Failed",
-                description=f"I need View Channel and Send Messages in {target.mention}.",
+                description=(
+                    f"Webhook relay cannot work in {target.mention}.\n"
+                    f"Missing or broken: **{', '.join(permission_issues)}**\n"
+                    "Grant these permissions to Fliphone, then run `f.repair` again."
+                ),
                 color=config.COLOR_ERR,
             )
 
-        pb_cog = self.bot.get_cog("Phonebooth")
-        webhook_url: Optional[str] = None
-        if perms.manage_webhooks and pb_cog:
-            webhook_url = await pb_cog.get_or_create_webhook(target)
-            if hasattr(pb_cog, "_wh_obj_cache"):
-                pb_cog._wh_obj_cache.clear()
+        webhook_url, webhook_issues = await pb_cog.ensure_relay_webhook(target)
+        if not webhook_url:
+            return discord.Embed(
+                title="Repair Failed",
+                description=(
+                    f"Discord did not allow Fliphone to create or inspect the webhook in {target.mention}.\n"
+                    f"Problem: **{', '.join(webhook_issues)}**"
+                ),
+                color=config.COLOR_ERR,
+            )
+        if hasattr(pb_cog, "_wh_obj_cache"):
+            pb_cog._wh_obj_cache.clear()
 
         await self.db.setup_guild(
             guild_id=guild.id,
@@ -308,7 +328,7 @@ class Admin(commands.Cog, name="Admin"):
         embed.add_field(name="Channel", value=target.mention, inline=True)
         embed.add_field(
             name="Webhook",
-            value="Recreated/updated" if webhook_url else "Unavailable - grant Manage Webhooks for full relay",
+            value="Verified and refreshed",
             inline=True,
         )
         embed.add_field(name="Next Step", value=f"Run `f.check`, then try `f.call` in {target.mention}.", inline=False)
@@ -323,16 +343,22 @@ class Admin(commands.Cog, name="Admin"):
     async def setup(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None) -> None:
         """Register a Fliphone channel for this server."""
         target = channel or ctx.channel
-        perms  = target.permissions_for(ctx.guild.me)
-
-        if not perms.send_messages:
-            await ctx.send(f"❌ I don't have **Send Messages** permission in {target.mention}.")
+        if not isinstance(target, discord.TextChannel):
+            await ctx.send("❌ Fliphone setup requires a normal text channel.")
             return
 
         pb_cog = self.bot.get_cog("Phonebooth")
-        wh_url: Optional[str] = None
-        if pb_cog and perms.manage_webhooks:
-            wh_url = await pb_cog.get_or_create_webhook(target)
+        if not pb_cog or not hasattr(pb_cog, "ensure_relay_webhook"):
+            await ctx.send("❌ Phonebooth relay is unavailable. Try again after the bot restarts.")
+            return
+        wh_url, permission_issues = await pb_cog.ensure_relay_webhook(target)
+        if not wh_url:
+            await ctx.send(
+                "❌ Fliphone cannot be set up until webhook relay permissions are fixed.\n"
+                f"Missing or broken: **{', '.join(permission_issues)}**\n"
+                "Required: View Channel, Send Messages, Embed Links, Read Message History, and Manage Webhooks."
+            )
+            return
 
         await self.db.setup_guild(
             guild_id=ctx.guild.id, channel_id=target.id,
@@ -341,10 +367,9 @@ class Admin(commands.Cog, name="Admin"):
         if pb_cog and hasattr(pb_cog, "_invalidate_config"):
             pb_cog._invalidate_config(guild_id=ctx.guild.id, channel_id=target.id)
 
-        wh_note = "✅ Webhook relay active" if wh_url else "⚠️ No webhook (grant Manage Webhooks for better relay)"
         await ctx.send(
             f"📞 **Fliphone set up in {target.mention}!**\n"
-            f"{wh_note}\n"
+            "✅ Webhook relay verified\n"
             f"Anonymous mode: OFF (toggle with `f.anon`)\n"
             f"Users can now run `f.call` in {target.mention}!\n"
             f"If setup ever acts broken, admins should run `f.check`, then `f.repair` if needed."
@@ -528,7 +553,7 @@ class Admin(commands.Cog, name="Admin"):
             name="Required Permissions",
             value=(
                 "• Send Messages\n"
-                "• Manage Webhooks *(for avatar relay)*\n"
+                "• Manage Webhooks *(required for relay)*\n"
                 "• Embed Links\n"
                 "• Read Message History"
             ),

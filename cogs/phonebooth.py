@@ -291,6 +291,7 @@ class Phonebooth(commands.Cog):
         self._cfg_by_guild: dict[int, dict] = {}
         self._session: aiohttp.ClientSession | None = None
         self._wh_obj_cache: dict[str, discord.Webhook] = {}
+        self._ending_broken_connections: set[int] = set()
         self._cleanup_loop.start()
 
     async def cog_load(self) -> None:
@@ -552,6 +553,104 @@ class Phonebooth(commands.Cog):
             print(f"[webhook] {exc}")
             return None
 
+    @staticmethod
+    def relay_permission_issues(channel: discord.TextChannel) -> list[str]:
+        bot_member = channel.guild.me
+        if bot_member is None:
+            return ["Bot member unavailable"]
+        perms = channel.permissions_for(bot_member)
+        required = (
+            ("View Channel", perms.view_channel),
+            ("Send Messages", perms.send_messages),
+            ("Embed Links", perms.embed_links),
+            ("Read Message History", perms.read_message_history),
+            ("Manage Webhooks", perms.manage_webhooks),
+        )
+        return [name for name, allowed in required if not allowed]
+
+    async def ensure_relay_webhook(
+        self,
+        channel: discord.TextChannel,
+    ) -> tuple[Optional[str], list[str]]:
+        """Validate required permissions and refresh the channel's stored webhook URL."""
+        issues = self.relay_permission_issues(channel)
+        if issues:
+            return None, issues
+
+        webhook_url = await self.get_or_create_webhook(channel)
+        if not webhook_url:
+            return None, ["Webhook access failed"]
+
+        await self.db.update_webhook(channel.id, webhook_url)
+        cfg = self._cfg_by_channel.get(channel.id)
+        if cfg is not None:
+            cfg["webhook_url"] = webhook_url
+        return webhook_url, []
+
+    async def _get_valid_queue_match(self, guild_id: int, channel_id: int) -> Optional[dict]:
+        """Discard stale queue entries until a server with a working webhook is found."""
+        while True:
+            match = await self.db.get_queue_match(guild_id, channel_id)
+            if not match:
+                return None
+
+            partner_channel = self.bot.get_channel(match["channel_id"])
+            if isinstance(partner_channel, discord.TextChannel):
+                webhook_url, issues = await self.ensure_relay_webhook(partner_channel)
+                if webhook_url:
+                    match["webhook_url"] = webhook_url
+                    return match
+            else:
+                issues = ["Configured channel is missing"]
+
+            await self.db.remove_from_queue(match["channel_id"])
+            self._cancel_timeout(match["channel_id"])
+            self._cancel_queue_nudge(match["channel_id"])
+            if partner_channel:
+                try:
+                    await partner_channel.send(
+                        "⚠️ Fliphone removed this server from the queue because webhook relay is unavailable.\n"
+                        f"Missing or broken: **{', '.join(issues)}**\n"
+                        "A server admin must run `f.check`, fix the listed permissions, then run `f.repair`."
+                    )
+                except discord.HTTPException:
+                    pass
+
+    async def _end_broken_connection(self, conn: dict) -> None:
+        """End a call instead of exposing relay content through plain bot fallback."""
+        conn_id = int(conn["id"])
+        if conn_id in self._ending_broken_connections:
+            return
+        self._ending_broken_connections.add(conn_id)
+        try:
+            current = await self.db.get_connection(conn["channel_a"])
+            if not current or int(current["id"]) != conn_id:
+                return
+            await self.db.remove_connection(conn_id)
+            self._invalidate_connection(conn)
+            self._call_reported_gifs.pop(conn_id, None)
+            self._cancel_inactivity(conn_id)
+            self._clear_rl_state(conn["channel_a"])
+            self._clear_rl_state(conn["channel_b"])
+            report_cog = self.bot.get_cog("Report")
+            if report_cog:
+                report_cog.clear_log(conn_id)
+
+            notice = (
+                "⚠️ **Call ended because webhook relay became unavailable.**\n"
+                "No messages were sent using the plain bot fallback. "
+                "A server admin should run `f.check`, fix any missing permissions, then run `f.repair`."
+            )
+            for channel_id in (conn["channel_a"], conn["channel_b"]):
+                channel = self.bot.get_channel(channel_id)
+                if channel:
+                    try:
+                        await channel.send(notice)
+                    except discord.HTTPException:
+                        pass
+        finally:
+            self._ending_broken_connections.discard(conn_id)
+
     async def _send_webhook(
         self,
         url: str,
@@ -600,14 +699,11 @@ class Phonebooth(commands.Cog):
     ) -> Optional[str]:
         if not isinstance(channel, discord.TextChannel):
             return None
-        webhook_url = await self.get_or_create_webhook(channel)
+        webhook_url, _ = await self.ensure_relay_webhook(channel)
         if not webhook_url:
             return None
 
-        await asyncio.gather(
-            self.db.update_webhook(channel.id, webhook_url),
-            self.db.update_connection_webhook(channel.id, webhook_url),
-        )
+        await self.db.update_connection_webhook(channel.id, webhook_url)
         if channel.id == conn["channel_a"]:
             conn["webhook_a"] = webhook_url
         elif channel.id == conn["channel_b"]:
@@ -970,28 +1066,7 @@ class Phonebooth(commands.Cog):
                             await asyncio.gather(*report_tasks, return_exceptions=True)
                 return
 
-        # ── Fallback: plain bot message ───────────────────────────────────────
-        if not target_channel:
-            return
-
-        body = text_content or ""
-        fallback_text = f"**{display_name}**\n{body}" if body else f"**{display_name}**"
-        try:
-            await target_channel.send(
-                content=fallback_text,
-                embed=reply_embed or discord.utils.MISSING,
-                files=files if files else discord.utils.MISSING,
-                allowed_mentions=discord.AllowedMentions.none(),
-                silent=bool(reportable_gif_urls),
-            )
-            report_tasks = [
-                _send_gif_report_card(target_channel, gif_url, None)
-                for gif_url in reportable_gif_urls
-            ]
-            if report_tasks:
-                await asyncio.gather(*report_tasks, return_exceptions=True)
-        except discord.HTTPException as exc:
-            print(f"[relay-fallback] {exc}")
+        await self._end_broken_connection(conn)
 
     # ── on_message ────────────────────────────────────────────────────────────
 
@@ -1050,8 +1125,15 @@ class Phonebooth(commands.Cog):
             await ctx.send(f"⏳ Already waiting ({_duration_str(q['joined_at'])}). Use `f.hangup` to cancel.")
             return
 
-        wh_url = cfg.get("webhook_url") or await self.get_or_create_webhook(ctx.channel)
-        match  = await self.db.get_queue_match(ctx.guild.id, ctx.channel.id)
+        wh_url, permission_issues = await self.ensure_relay_webhook(ctx.channel)
+        if not wh_url:
+            await ctx.send(
+                "❌ Fliphone cannot start a call because webhook relay is unavailable.\n"
+                f"Missing or broken: **{', '.join(permission_issues)}**\n"
+                "A server admin must run `f.check`, fix the listed permissions, then run `f.repair`."
+            )
+            return
+        match = await self._get_valid_queue_match(ctx.guild.id, ctx.channel.id)
 
         if match:
             self._cancel_timeout(match["channel_id"])
@@ -1255,8 +1337,15 @@ class Phonebooth(commands.Cog):
 
         await ctx.send("⏭️ you have skipped this caller.")
 
-        wh_url = cfg.get("webhook_url") or await self.get_or_create_webhook(ctx.channel)
-        match  = await self.db.get_queue_match(ctx.guild.id, ctx.channel.id)
+        wh_url, permission_issues = await self.ensure_relay_webhook(ctx.channel)
+        if not wh_url:
+            await ctx.send(
+                "❌ Fliphone cannot search for a new call because webhook relay is unavailable.\n"
+                f"Missing or broken: **{', '.join(permission_issues)}**\n"
+                "A server admin must run `f.check`, fix the listed permissions, then run `f.repair`."
+            )
+            return
+        match = await self._get_valid_queue_match(ctx.guild.id, ctx.channel.id)
 
         if match:
             self._cancel_timeout(match["channel_id"])

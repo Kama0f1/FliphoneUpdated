@@ -541,6 +541,12 @@ class Database:
             (channel_id, webhook_url, channel_id, webhook_url, channel_id, channel_id),
         )
 
+    async def update_room_member_webhook(self, channel_id: int, webhook_url: Optional[str]) -> None:
+        await self._execute(
+            "UPDATE room_members SET webhook_url = ? WHERE channel_id = ?",
+            (webhook_url, channel_id),
+        )
+
     async def add_to_queue(self, channel_id, guild_id, user_id, webhook_url) -> None:
         await self._execute(
             """

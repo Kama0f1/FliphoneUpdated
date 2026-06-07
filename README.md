@@ -20,7 +20,7 @@ Messages are relayed in real time. Fliphone **never stores message content.**
 
 - **1-on-1 calls** — matched instantly when someone is waiting, or queued for up to 10 minutes
 - **Group rooms** — up to 6 servers in one room, identified by NATO station names
-- **Webhook relay** — messages appear with the sender's filtered display name and avatar (when bot has Manage Webhooks)
+- **Webhook relay** — messages appear with the sender's filtered display name and avatar
 - **Anonymous mode** — senders appear as *Stranger [NATO word]* with a robot avatar
 - **GIF moderation** — built-in report system with blacklist/whitelist management
 - **Content filter** — automatic censorship of slurs and harmful language
@@ -36,17 +36,16 @@ Messages are relayed in real time. Fliphone **never stores message content.**
 
 ### 1. Invite the bot
 
-[**➕ Add Fliphone to your server**](https://discord.com/api/oauth2/authorize?client_id=1489342959974486158&permissions=536988736&scope=bot+applications.commands)
+[**➕ Add Fliphone to your server**](https://discord.com/api/oauth2/authorize?client_id=1489342959974486158&permissions=536955904&scope=bot+applications.commands)
 
 **Required permissions:**
 | Permission | Used for |
 |---|---|
 | View Channel | Reading messages in the phonebooth channel |
 | Send Messages | Sending relay messages and status embeds |
-| Manage Webhooks | ⭐ Seamless relay with real avatars/names |
+| Manage Webhooks | Required for all cross-server message relay |
 | Embed Links | All status and help embeds |
 | Read Message History | Webhook lookup and reply context |
-| Add Reactions | Future feature support |
 
 ### 2. Set up your channel
 
@@ -56,7 +55,7 @@ In the channel you want to use as the phonebooth, run:
 f.setup
 ```
 
-The bot creates a webhook automatically (if it has Manage Webhooks permission) and registers that channel. You only need to do this once.
+The bot verifies its required channel permissions, creates a webhook automatically, and registers that channel. Manage Webhooks is required.
 
 ### 3. Start a call
 
@@ -140,8 +139,8 @@ Server A  ◄──relay──   Bot  ──relay──►  Server B
 
 ### Relay priority
 
-1. **Webhook relay** (if bot has Manage Webhooks) — message appears with the sender's filtered display name and avatar, no bot prefix clutter.
-2. **Fallback plain message** — if webhooks aren't available, the bot sends `**Name**\nmessage`.
+1. **Webhook relay** — message appears with the sender's filtered display name and avatar.
+2. If webhook permissions break, Fliphone repairs the webhook or safely stops the call instead of exposing messages through a plain bot fallback.
 
 ### What gets relayed
 
