@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import time
 from datetime import datetime
 from typing import Any, Optional, Sequence
 
@@ -131,6 +132,11 @@ CREATE TABLE IF NOT EXISTS notify_subscribers (
     user_id    INTEGER PRIMARY KEY,
     enabled    INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS scheduled_jobs (
+    job_key     TEXT PRIMARY KEY,
+    next_run_at REAL NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS gif_url_list (
@@ -264,6 +270,11 @@ CREATE TABLE IF NOT EXISTS notify_subscribers (
     user_id    BIGINT PRIMARY KEY,
     enabled    INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS scheduled_jobs (
+    job_key     TEXT PRIMARY KEY,
+    next_run_at DOUBLE PRECISION NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS gif_url_list (
@@ -946,6 +957,36 @@ class Database:
             (user_id,),
         )
         return bool(row["enabled"]) if row else False
+
+    async def claim_scheduled_job(self, job_key: str, interval_seconds: float) -> bool:
+        """
+        Atomically claim a due recurring job.
+
+        A new job is scheduled one full interval into the future, so deploying
+        or restarting the bot never causes an immediate notification.
+        """
+        now = time.time()
+        next_run_at = now + interval_seconds
+        inserted = await self._execute(
+            """
+            INSERT INTO scheduled_jobs (job_key, next_run_at)
+            VALUES (?, ?)
+            ON CONFLICT(job_key) DO NOTHING
+            """,
+            (job_key, next_run_at),
+        )
+        if inserted:
+            return False
+
+        claimed = await self._execute(
+            """
+            UPDATE scheduled_jobs
+            SET next_run_at = ?
+            WHERE job_key = ? AND next_run_at <= ?
+            """,
+            (next_run_at, job_key, now),
+        )
+        return claimed > 0
 
     async def add_call_report(
         self,

@@ -596,14 +596,22 @@ class Phonebooth(commands.Cog):
             return None, issues
 
         try:
-            for webhook in await channel.webhooks():
+            webhooks = await channel.webhooks()
+            other_webhook_count = 0
+            for webhook in webhooks:
                 if webhook.user == self.bot.user and webhook.name == "Fliphone":
                     self._wh_obj_cache.pop(webhook.url, None)
                     await webhook.delete(reason="Fliphone setup reset")
+                else:
+                    other_webhook_count += 1
+            if other_webhook_count >= 15:
+                return None, ["This channel already has Discord's maximum of 15 webhooks"]
             webhook_url = (await channel.create_webhook(name="Fliphone")).url
         except discord.Forbidden:
             return None, ["Manage Webhooks"]
-        except discord.HTTPException:
+        except discord.HTTPException as exc:
+            if exc.code == 30007:
+                return None, ["This channel already has Discord's maximum number of webhooks"]
             return None, ["Discord webhook creation failed"]
 
         await self.db.update_webhook(channel.id, webhook_url)

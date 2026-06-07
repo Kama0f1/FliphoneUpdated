@@ -2,12 +2,10 @@
 cogs/vote.py – Top.gg vote reminders for Fliphone.
 
 Sends periodic DMs to opted-in notify subscribers asking them to vote.
-No rewards — just a polite nudge, max once every 12 hours per user.
+No rewards — just a polite nudge, with one persistent broadcast every 12 hours.
 """
 
 from __future__ import annotations
-
-import time
 
 import discord
 from discord.ext import commands, tasks
@@ -37,59 +35,36 @@ def _vote_embed(bot_id: int) -> discord.Embed:
 class Vote(commands.Cog):
     """Handles top.gg vote reminder DMs."""
 
-    # 12 hours between reminders per user
+    JOB_KEY = "vote_reminder_broadcast"
     REMIND_COOLDOWN = 12 * 60 * 60
 
     def __init__(self, bot) -> None:
         self.bot = bot
         self.db: Database = bot.db
-        # user_id → monotonic timestamp of last vote DM sent this session
-        self._last_reminded: dict[int, float] = {}
         self._vote_reminder_loop.start()
 
     def cog_unload(self) -> None:
         self._vote_reminder_loop.cancel()
 
-    # ── Periodic task: every 12 h DM all notify subscribers ──────────────────
+    # Check often, but the persistent database schedule permits one run per 12 h.
 
-    @tasks.loop(hours=12)
+    @tasks.loop(minutes=5)
     async def _vote_reminder_loop(self) -> None:
+        if not await self.db.claim_scheduled_job(self.JOB_KEY, self.REMIND_COOLDOWN):
+            return
+
         subscribers = await self.db.get_notify_subscribers()
-        now = time.monotonic()
         for uid in subscribers:
-            if now - self._last_reminded.get(uid, 0) < self.REMIND_COOLDOWN:
-                continue
             try:
                 user = self.bot.get_user(uid) or await self.bot.fetch_user(uid)
                 if user:
                     await user.send(embed=_vote_embed(self.bot.user.id))
-                    self._last_reminded[uid] = now
             except (discord.Forbidden, discord.HTTPException):
                 pass
 
     @_vote_reminder_loop.before_loop
     async def _before_loop(self) -> None:
         await self.bot.wait_until_ready()
-
-    # ── Public helper called from phonebooth after a queue notify DM ──────────
-
-    async def maybe_send_vote_dm(self, user_id: int) -> None:
-        """
-        Send a vote reminder to one user if 12 hours have passed since
-        their last reminder. Called alongside queue notify DMs so it
-        piggybacks without spamming.
-        """
-        now = time.monotonic()
-        if now - self._last_reminded.get(user_id, 0) < self.REMIND_COOLDOWN:
-            return
-        try:
-            user = self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
-            if user:
-                await user.send(embed=_vote_embed(self.bot.user.id))
-                self._last_reminded[user_id] = now
-        except (discord.Forbidden, discord.HTTPException):
-            pass
-
 
 async def setup(bot) -> None:
     await bot.add_cog(Vote(bot))

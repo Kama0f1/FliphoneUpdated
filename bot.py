@@ -218,7 +218,6 @@ class PhoneboothBot(commands.AutoShardedBot):
             if not perms.send_messages:   missing.append("Send Messages")
             if not perms.manage_webhooks: missing.append("Manage Webhooks")
             if not perms.embed_links:     missing.append("Embed Links")
-            if not perms.attach_files:    missing.append("Attach Files")
             if not perms.read_message_history: missing.append("Read Message History")
 
         # ── Try to send welcome in first available text channel ───────────────
@@ -247,12 +246,17 @@ class PhoneboothBot(commands.AutoShardedBot):
                     color=0x5865F2,
                 )
                 if missing:
+                    invite_url = (
+                        "https://discord.com/api/oauth2/authorize"
+                        f"?client_id={self.user.id}&permissions={config.BOT_PERMISSIONS}"
+                        f"&scope=bot%20applications.commands&guild_id={guild.id}&disable_guild_select=true"
+                    )
                     embed.add_field(
                         name="⚠️ Missing Permissions",
                         value=(
                             f"I'm missing: **{', '.join(missing)}**\n"
-                            f"Please grant these in Server Settings → Roles → Fliphone\n"
-                            f"or re-invite me with the correct permissions."
+                            f"**[Re-invite me with the correct permissions]({invite_url})**, then run `f.setup`.\n"
+                            "If setup still reports a missing permission, the chosen channel or category is denying it."
                         ),
                         inline=False,
                     )

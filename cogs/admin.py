@@ -309,6 +309,10 @@ class Admin(commands.Cog, name="Admin"):
                         ok_lines.append("Relay webhook is present.")
                     elif bot_webhook:
                         issues.append("The stored relay webhook is stale. Run `f.repair`.")
+                    elif len(webhooks) >= 15:
+                        issues.append(
+                            "This channel has Discord's maximum of 15 webhooks. Delete one or use another channel."
+                        )
                     else:
                         issues.append("No Fliphone webhook found. Run `f.repair`.")
                 except discord.Forbidden:
@@ -350,7 +354,12 @@ class Admin(commands.Cog, name="Admin"):
             )
             embed.add_field(
                 name="Next Step",
-                value="Run `f.setup` in the channel you want to use. It will reset and rebuild everything automatically.",
+                value=(
+                    "Run `f.setup` in the channel you want to use. It will reset and rebuild everything automatically.\n\n"
+                    "If it reports missing permissions, re-invite Fliphone first. If the same permission is still "
+                    "missing, that channel or its category is explicitly denying it; allow Fliphone there or use "
+                    "another channel."
+                ),
                 inline=False,
             )
         else:
@@ -386,7 +395,9 @@ class Admin(commands.Cog, name="Admin"):
                 description=(
                     f"Fliphone is missing: **{', '.join(permission_issues)}**\n\n"
                     f"**[Re-invite Fliphone with the correct permissions]({self._invite_url(guild.id)})**, "
-                    "then run `f.setup` again in this channel. If Discord still blocks it, use a new channel."
+                    "then run `f.setup` again here.\n\n"
+                    "If the same permission is still missing after reinviting, this channel or its category has "
+                    "an override denying it. Allow Fliphone's role there, or run `f.setup` in another channel."
                 ),
                 color=config.COLOR_ERR,
             )
@@ -399,7 +410,7 @@ class Admin(commands.Cog, name="Admin"):
                 description=(
                     f"Discord blocked webhook creation: **{', '.join(webhook_issues)}**\n\n"
                     f"**[Re-invite Fliphone]({self._invite_url(guild.id)})**, then run `f.setup` again. "
-                    "If Discord still blocks it, use a new channel."
+                    "If it still fails, allow Manage Webhooks for Fliphone in this channel/category or use another channel."
                 ),
                 color=config.COLOR_ERR,
             )
