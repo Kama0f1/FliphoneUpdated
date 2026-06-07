@@ -20,7 +20,7 @@ Messages are relayed in real time. Fliphone **never stores message content.**
 
 - **1-on-1 calls** — matched instantly when someone is waiting, or queued for up to 10 minutes
 - **Group rooms** — up to 6 servers in one room, identified by NATO station names
-- **Webhook relay** — messages appear with the sender's filtered display name and avatar
+- **Webhook relay** — messages appear with the sender's filtered display name and global Discord avatar
 - **Anonymous mode** — senders appear as *Stranger [NATO word]* with a robot avatar
 - **GIF moderation** — built-in report system with blacklist/whitelist management
 - **Content filter** — automatic censorship of slurs and harmful language

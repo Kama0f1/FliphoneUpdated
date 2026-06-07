@@ -164,6 +164,7 @@ class Admin(commands.Cog, name="Admin"):
         self,
         guild: discord.Guild,
         invoking_channel: discord.TextChannel,
+        probe_user: Optional[discord.Member] = None,
     ) -> tuple[discord.Embed, Optional[int]]:
         guild_cfg = await self.db.get_guild_config(guild.id)
         issues: list[str] = []
@@ -212,6 +213,7 @@ class Admin(commands.Cog, name="Admin"):
 
             if perms.manage_webhooks:
                 ok_lines.append("Manage Webhooks is available.")
+                bot_webhook = None
                 try:
                     webhooks = await channel.webhooks()
                     bot_webhook = next(
@@ -229,6 +231,15 @@ class Admin(commands.Cog, name="Admin"):
                     issues.append("Cannot inspect webhooks. Check channel and role permission overrides, then run `f.repair`.")
                 except discord.HTTPException:
                     issues.append("Discord failed while checking webhooks. Try `f.check` again.")
+
+                if bot_webhook and probe_user:
+                    pb_cog = self.bot.get_cog("Phonebooth")
+                    if pb_cog and hasattr(pb_cog, "probe_webhook_avatar"):
+                        avatar_ok, avatar_issue = await pb_cog.probe_webhook_avatar(channel, probe_user)
+                        if avatar_ok:
+                            ok_lines.append("Webhook avatar delivery test passed.")
+                        else:
+                            issues.append(f"Webhook avatar delivery test failed: {avatar_issue}.")
         q = await self.db.get_queue_entry(channel_id)
         conn = await self.db.get_connection(channel_id)
         room_member = await self.db.get_room_member(channel_id)
@@ -391,7 +402,7 @@ class Admin(commands.Cog, name="Admin"):
     @commands.has_permissions(manage_channels=True)
     async def check(self, ctx: commands.Context) -> None:
         """Check whether this server's Fliphone setup is healthy."""
-        embed, repair_channel_id = await self._build_check_embed(ctx.guild, ctx.channel)
+        embed, repair_channel_id = await self._build_check_embed(ctx.guild, ctx.channel, ctx.author)
         view = SetupCheckView(self, repair_channel_id) if repair_channel_id else None
         await ctx.send(embed=embed, view=view)
 

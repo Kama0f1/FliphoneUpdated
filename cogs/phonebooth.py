@@ -62,15 +62,14 @@ def _anon_identity(seed: int) -> tuple[str, str]:
 
 
 def _get_avatar_url(member: discord.Member | discord.User) -> str:
-    if isinstance(member, discord.Member) and member.guild_avatar:
-        asset = member.guild_avatar
-    else:
-        asset = member.display_avatar
+    # Guild-specific avatars are not reliable when Discord fetches them for a
+    # webhook in another server. Global profile avatars are cross-server assets.
+    asset = member.avatar or member.default_avatar
     try:
         return str(asset.with_static_format("png").with_size(256).url)
     except Exception:
         try:
-            return str(member.display_avatar.url)
+            return str(asset.url)
         except Exception:
             return str(member.default_avatar.url)
 
@@ -586,6 +585,35 @@ class Phonebooth(commands.Cog):
         if cfg is not None:
             cfg["webhook_url"] = webhook_url
         return webhook_url, []
+
+    async def probe_webhook_avatar(
+        self,
+        channel: discord.TextChannel,
+        member: discord.Member | discord.User,
+    ) -> tuple[bool, str]:
+        """Send and delete a webhook probe, verifying Discord applied an avatar."""
+        webhook_url, issues = await self.ensure_relay_webhook(channel)
+        if not webhook_url:
+            return False, ", ".join(issues)
+
+        probe = await self._send_webhook(
+            webhook_url,
+            "Fliphone avatar relay diagnostic",
+            "Fliphone Avatar Test",
+            _get_avatar_url(member),
+            [],
+            wait=True,
+            silent=True,
+        )
+        if not isinstance(probe, discord.WebhookMessage):
+            return False, "Webhook test message failed"
+
+        avatar_applied = probe.author.avatar is not None
+        try:
+            await probe.delete()
+        except discord.HTTPException:
+            pass
+        return avatar_applied, "" if avatar_applied else "Discord did not apply the webhook avatar"
 
     async def _get_valid_queue_match(self, guild_id: int, channel_id: int) -> Optional[dict]:
         """Discard stale queue entries until a server with a working webhook is found."""

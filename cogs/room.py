@@ -89,15 +89,12 @@ def _anon_identity(seed: int) -> tuple[str, str]:
 
 
 def _get_avatar_url(member: discord.Member | discord.User) -> str:
-    if isinstance(member, discord.Member) and member.guild_avatar:
-        asset = member.guild_avatar
-    else:
-        asset = member.display_avatar
+    asset = member.avatar or member.default_avatar
     try:
         return str(asset.with_static_format("png").with_size(256).url)
     except Exception:
         try:
-            return str(member.display_avatar.url)
+            return str(asset.url)
         except Exception:
             return str(member.default_avatar.url)
 
