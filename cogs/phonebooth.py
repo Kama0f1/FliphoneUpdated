@@ -49,6 +49,16 @@ MENTION_PATTERN = re.compile(r"<@!?(\d+)>")
 # Matches custom Discord emojis: <:name:id> and animated <a:name:id>.
 # Regular Unicode/keyboard emojis are plain text and are allowed through.
 CUSTOM_EMOJI_PATTERN = re.compile(r"<a?:[a-zA-Z0-9_]+:[0-9]+>")
+UNICODE_EMOJI_PATTERN = re.compile(
+    r"(?:"
+    r"[\U0001F1E6-\U0001F1FF]{2}|"
+    r"(?:[\U0001F300-\U0001FAFF]|[\u2600-\u27BF])"
+    r"[\ufe0f\U0001F3FB-\U0001F3FF]*"
+    r"(?:\u200d(?:[\U0001F300-\U0001FAFF]|[\u2600-\u27BF])"
+    r"[\ufe0f\U0001F3FB-\U0001F3FF]*)*"
+    r")"
+)
+MAX_EMOJIS_PER_MESSAGE = 10
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -95,6 +105,21 @@ def _render_user_mentions(text: str, guild: discord.Guild | None) -> str:
         return "@user"
 
     return MENTION_PATTERN.sub(_replace, text)
+
+
+def _limit_unicode_emojis(text: str, limit: int = MAX_EMOJIS_PER_MESSAGE) -> tuple[str, bool]:
+    count = 0
+    trimmed = False
+
+    def _replace(match: re.Match[str]) -> str:
+        nonlocal count, trimmed
+        count += 1
+        if count <= limit:
+            return match.group(0)
+        trimmed = True
+        return ""
+
+    return UNICODE_EMOJI_PATTERN.sub(_replace, text), trimmed
 # ── GIF Report View ───────────────────────────────────────────────────────────
 
 class GifReportView(discord.ui.View):
@@ -935,6 +960,7 @@ class Phonebooth(commands.Cog):
                         ref_text = "message"
                 embed_color = random.randint(0x100000, 0xFFFFFF)
                 ref_text = CUSTOM_EMOJI_PATTERN.sub("", ref_text).strip()
+                ref_text, _ = _limit_unicode_emojis(ref_text)
                 ref_text = _render_user_mentions(ref_text, message.guild)
                 reply_context = (
                     f"> Replying to **{discord.utils.escape_markdown(ref_author)}**: "
@@ -958,6 +984,17 @@ class Phonebooth(commands.Cog):
                 pass
 
         content = CUSTOM_EMOJI_PATTERN.sub("", content).strip()
+        content, emojis_trimmed = _limit_unicode_emojis(content)
+        if emojis_trimmed:
+            content = content.strip()
+            try:
+                await message.channel.send(
+                    f"⚠️ {message.author.mention} Too many emojis at once. "
+                    f"Only the first **{MAX_EMOJIS_PER_MESSAGE}** were sent.",
+                    delete_after=8,
+                )
+            except discord.HTTPException:
+                pass
         content = _render_user_mentions(content, message.guild)
 
         # ── Strip non-GIF links ───────────────────────────────────────────────
