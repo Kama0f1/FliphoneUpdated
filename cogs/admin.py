@@ -20,6 +20,7 @@ f.pb             – Legacy command group (still works)
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 import time
 from typing import Optional
@@ -37,7 +38,7 @@ class SetupCheckView(discord.ui.View):
         self.cog = cog
         self.channel_id = channel_id
 
-    @discord.ui.button(label="Repair Setup", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Reset Setup", style=discord.ButtonStyle.primary)
     async def repair_setup(
         self,
         interaction: discord.Interaction,
@@ -147,9 +148,92 @@ class Admin(commands.Cog, name="Admin"):
     def __init__(self, bot) -> None:
         self.bot = bot
         self.db: Database = bot.db
+        self._setup_locks: dict[int, asyncio.Lock] = {}
 
     def create_gif_report_panel_view(self, reports: list[dict]) -> Optional[discord.ui.View]:
         return GifReportPanelView(self, reports) if reports else None
+
+    def _invite_url(self, guild_id: Optional[int] = None) -> str:
+        url = (
+            "https://discord.com/api/oauth2/authorize"
+            f"?client_id={self.bot.user.id}"
+            f"&permissions={config.BOT_PERMISSIONS}"
+            "&scope=bot%20applications.commands"
+        )
+        if guild_id:
+            url += f"&guild_id={guild_id}&disable_guild_select=true"
+        return url
+
+    async def _delete_fliphone_webhooks(self, channel: Optional[discord.TextChannel]) -> None:
+        if not channel:
+            return
+        pb_cog = self.bot.get_cog("Phonebooth")
+        try:
+            for webhook in await channel.webhooks():
+                if webhook.user == self.bot.user and webhook.name == "Fliphone":
+                    if pb_cog and hasattr(pb_cog, "_wh_obj_cache"):
+                        pb_cog._wh_obj_cache.pop(webhook.url, None)
+                    await webhook.delete(reason="Fliphone setup reset")
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    async def _clear_guild_setup_state(self, guild: discord.Guild, *, notify_partner: bool) -> None:
+        """Remove active runtime state and stored setup before a clean rebuild."""
+        guild_cfg = await self.db.get_guild_config(guild.id)
+        if not guild_cfg:
+            return
+
+        channel_id = int(guild_cfg["channel_id"])
+        pb_cog = self.bot.get_cog("Phonebooth")
+        room_cog = self.bot.get_cog("Room")
+
+        conn = await self.db.get_connection(channel_id)
+        if conn:
+            other_id = conn["channel_b"] if channel_id == conn["channel_a"] else conn["channel_a"]
+            await self.db.remove_connection(conn["id"])
+            if pb_cog:
+                pb_cog._invalidate_connection(conn)
+                pb_cog._cancel_inactivity(conn["id"])
+                pb_cog._cancel_timeout(channel_id)
+                pb_cog._cancel_queue_nudge(channel_id)
+                pb_cog._call_reported_gifs.pop(conn["id"], None)
+                pb_cog._clear_rl_state(conn["channel_a"])
+                pb_cog._clear_rl_state(conn["channel_b"])
+            report_cog = self.bot.get_cog("Report")
+            if report_cog:
+                report_cog.clear_log(conn["id"])
+            if notify_partner:
+                other = self.bot.get_channel(other_id)
+                if other:
+                    try:
+                        await other.send("📵 The other server reset its Fliphone setup, so the call ended.")
+                    except discord.HTTPException:
+                        pass
+
+        await self.db.remove_from_queue(channel_id)
+        if pb_cog:
+            pb_cog._cancel_timeout(channel_id)
+            pb_cog._cancel_queue_nudge(channel_id)
+
+        room_member = await self.db.get_room_member(channel_id)
+        if room_member:
+            if room_cog and hasattr(room_cog, "_remove_member"):
+                await room_cog._remove_member(
+                    channel_id,
+                    room_member["room_id"],
+                    broadcast_reason=f"📡 **Station {room_member['station']}** reset its setup.",
+                    notify_leaver=False,
+                )
+            else:
+                await self.db.remove_room_member(channel_id)
+
+        old_channel = self.bot.get_channel(channel_id)
+        await self._delete_fliphone_webhooks(
+            old_channel if isinstance(old_channel, discord.TextChannel) else None
+        )
+        await self.db.delete_guild(guild.id)
+        if pb_cog:
+            pb_cog._invalidate_config(guild_id=guild.id, channel_id=channel_id)
 
     async def send_gif_report_panel_interaction(self, interaction: discord.Interaction) -> None:
         if not await self._is_global_mod(interaction.user, interaction.guild):
@@ -176,7 +260,7 @@ class Admin(commands.Cog, name="Admin"):
                 title="Fliphone Setup Check",
                 description=(
                     "This server is not set up yet.\n"
-                    "Run `f.setup` in the channel you want to use, then run `f.check` again."
+                    "Run `f.setup` in the channel you want to use."
                 ),
                 color=config.COLOR_WARN,
             )
@@ -228,7 +312,7 @@ class Admin(commands.Cog, name="Admin"):
                     else:
                         issues.append("No Fliphone webhook found. Run `f.repair`.")
                 except discord.Forbidden:
-                    issues.append("Cannot inspect webhooks. Check channel and role permission overrides, then run `f.repair`.")
+                    issues.append("Cannot inspect webhooks. Run `f.setup` to rebuild everything.")
                 except discord.HTTPException:
                     issues.append("Discord failed while checking webhooks. Try `f.check` again.")
 
@@ -266,10 +350,7 @@ class Admin(commands.Cog, name="Admin"):
             )
             embed.add_field(
                 name="Next Step",
-                value=(
-                    "Grant any missing channel permissions first, then run `f.repair` or press **Repair Setup**. "
-                    "If the configured channel was deleted, run `f.repair #channel`."
-                ),
+                value="Run `f.setup` in the channel you want to use. It will reset and rebuild everything automatically.",
                 inline=False,
             )
         else:
@@ -277,25 +358,22 @@ class Admin(commands.Cog, name="Admin"):
         embed.set_footer(text=config.FOOTER)
         return embed, repair_channel_id if issues else None
 
-    async def _repair_setup(
+    async def _reset_and_setup(
         self,
         guild: discord.Guild,
         user: discord.abc.User,
         target: discord.TextChannel,
     ) -> discord.Embed:
-        guild_cfg = await self.db.get_guild_config(guild.id)
-        old_channel_id = int(guild_cfg["channel_id"]) if guild_cfg else None
+        lock = self._setup_locks.setdefault(guild.id, asyncio.Lock())
+        async with lock:
+            return await self._reset_and_setup_locked(guild, user, target)
 
-        if old_channel_id and old_channel_id != target.id:
-            old_conn = await self.db.get_connection(old_channel_id)
-            if old_conn:
-                return discord.Embed(
-                    title="Repair Blocked",
-                    description="The old configured channel is in an active call. End it with `f.kick` before moving setup.",
-                    color=config.COLOR_ERR,
-                )
-            await self.db.remove_from_queue(old_channel_id)
-
+    async def _reset_and_setup_locked(
+        self,
+        guild: discord.Guild,
+        user: discord.abc.User,
+        target: discord.TextChannel,
+    ) -> discord.Embed:
         pb_cog = self.bot.get_cog("Phonebooth")
         permission_issues = (
             pb_cog.relay_permission_issues(target)
@@ -304,27 +382,27 @@ class Admin(commands.Cog, name="Admin"):
         )
         if permission_issues:
             return discord.Embed(
-                title="Repair Failed",
+                title="Setup Needs Permissions",
                 description=(
-                    f"Webhook relay cannot work in {target.mention}.\n"
-                    f"Missing or broken: **{', '.join(permission_issues)}**\n"
-                    "Grant these permissions to Fliphone, then run `f.repair` again."
+                    f"Fliphone is missing: **{', '.join(permission_issues)}**\n\n"
+                    f"**[Re-invite Fliphone with the correct permissions]({self._invite_url(guild.id)})**, "
+                    "then run `f.setup` again in this channel. If Discord still blocks it, use a new channel."
                 ),
                 color=config.COLOR_ERR,
             )
 
-        webhook_url, webhook_issues = await pb_cog.ensure_relay_webhook(target)
+        await self._clear_guild_setup_state(guild, notify_partner=True)
+        webhook_url, webhook_issues = await pb_cog.rebuild_relay_webhook(target)
         if not webhook_url:
             return discord.Embed(
-                title="Repair Failed",
+                title="Setup Could Not Finish",
                 description=(
-                    f"Discord did not allow Fliphone to create or inspect the webhook in {target.mention}.\n"
-                    f"Problem: **{', '.join(webhook_issues)}**"
+                    f"Discord blocked webhook creation: **{', '.join(webhook_issues)}**\n\n"
+                    f"**[Re-invite Fliphone]({self._invite_url(guild.id)})**, then run `f.setup` again. "
+                    "If Discord still blocks it, use a new channel."
                 ),
                 color=config.COLOR_ERR,
             )
-        if hasattr(pb_cog, "_wh_obj_cache"):
-            pb_cog._wh_obj_cache.clear()
 
         await self.db.setup_guild(
             guild_id=guild.id,
@@ -332,19 +410,24 @@ class Admin(commands.Cog, name="Admin"):
             webhook_url=webhook_url,
             user_id=user.id,
         )
-        if pb_cog and hasattr(pb_cog, "_invalidate_config"):
-            pb_cog._invalidate_config(guild_id=guild.id, channel_id=old_channel_id)
+        pb_cog._invalidate_config(guild_id=guild.id, channel_id=target.id)
 
-        embed = discord.Embed(title="Setup Repaired", color=config.COLOR_OK, timestamp=datetime.utcnow())
+        avatar_ok, _ = await pb_cog.probe_webhook_avatar(target, user)
+        embed = discord.Embed(title="Fliphone Is Ready", color=config.COLOR_OK, timestamp=datetime.utcnow())
         embed.add_field(name="Channel", value=target.mention, inline=True)
-        embed.add_field(
-            name="Webhook",
-            value="Verified and refreshed",
-            inline=True,
-        )
-        embed.add_field(name="Next Step", value=f"Run `f.check`, then try `f.call` in {target.mention}.", inline=False)
+        embed.add_field(name="Relay", value="Fresh webhook created", inline=True)
+        embed.add_field(name="Avatar Test", value="Passed" if avatar_ok else "Using safe fallback", inline=True)
+        embed.add_field(name="Next Step", value=f"Users can run `f.call` in {target.mention}.", inline=False)
         embed.set_footer(text=config.FOOTER)
         return embed
+
+    async def _repair_setup(
+        self,
+        guild: discord.Guild,
+        user: discord.abc.User,
+        target: discord.TextChannel,
+    ) -> discord.Embed:
+        return await self._reset_and_setup(guild, user, target)
 
     # ── f.setup ───────────────────────────────────────────────────────────────
 
@@ -352,48 +435,14 @@ class Admin(commands.Cog, name="Admin"):
     @commands.guild_only()
     @commands.has_permissions(manage_channels=True)
     async def setup(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None) -> None:
-        """Register a Fliphone channel for this server."""
+        """Reset and fully rebuild Fliphone in the selected channel."""
         target = channel or ctx.channel
         if not isinstance(target, discord.TextChannel):
             await ctx.send("❌ Fliphone setup requires a normal text channel.")
             return
 
-        pb_cog = self.bot.get_cog("Phonebooth")
-        if not pb_cog or not hasattr(pb_cog, "ensure_relay_webhook"):
-            await ctx.send("❌ Phonebooth relay is unavailable. Try again after the bot restarts.")
-            return
-        wh_url, permission_issues = await pb_cog.ensure_relay_webhook(target)
-        if not wh_url:
-            await ctx.send(
-                "❌ Fliphone cannot be set up until webhook relay permissions are fixed.\n"
-                f"Missing or broken: **{', '.join(permission_issues)}**\n"
-                "Required: View Channel, Send Messages, Embed Links, Read Message History, and Manage Webhooks."
-            )
-            return
-
-        await self.db.setup_guild(
-            guild_id=ctx.guild.id, channel_id=target.id,
-            webhook_url=wh_url, user_id=ctx.author.id,
-        )
-        if pb_cog and hasattr(pb_cog, "_invalidate_config"):
-            pb_cog._invalidate_config(guild_id=ctx.guild.id, channel_id=target.id)
-
-        await ctx.send(
-            f"📞 **Fliphone set up in {target.mention}!**\n"
-            "✅ Webhook relay verified\n"
-            f"Anonymous mode: OFF (toggle with `f.anon`)\n"
-            f"Users can now run `f.call` in {target.mention}!\n"
-            f"If setup ever acts broken, admins should run `f.check`, then `f.repair` if needed."
-        )
-
-        if target != ctx.channel:
-            try:
-                await target.send(
-                    "📞 **This channel is now a Fliphone!**\n"
-                    "Type `f.call` to connect with a random server."
-                )
-            except discord.HTTPException:
-                pass
+        embed = await self._reset_and_setup(ctx.guild, ctx.author, target)
+        await ctx.send(embed=embed)
 
     # ── f.teardown ────────────────────────────────────────────────────────────
 
@@ -410,7 +459,7 @@ class Admin(commands.Cog, name="Admin"):
     @commands.guild_only()
     @commands.has_permissions(manage_channels=True)
     async def repair(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None) -> None:
-        """Repair the configured channel/webhook after f.check finds a problem."""
+        """Reset and rebuild setup. Equivalent to f.setup in the configured channel."""
         guild_cfg = await self.db.get_guild_config(ctx.guild.id)
         target = channel
         if target is None and guild_cfg:
@@ -487,43 +536,19 @@ class Admin(commands.Cog, name="Admin"):
     @commands.guild_only()
     @commands.has_permissions(manage_channels=True)
     async def teardown(self, ctx: commands.Context) -> None:
-        """Remove the Fliphone configuration for this server."""
-        guild_cfg = await self.db.get_guild_config(ctx.guild.id)
-        if not guild_cfg:
-            await ctx.send("❌ Fliphone isn't configured in this server.")
-            return
+        """Completely remove Fliphone state so the next f.setup starts clean."""
+        lock = self._setup_locks.setdefault(ctx.guild.id, asyncio.Lock())
+        async with lock:
+            guild_cfg = await self.db.get_guild_config(ctx.guild.id)
+            if not guild_cfg:
+                await self._delete_fliphone_webhooks(
+                    ctx.channel if isinstance(ctx.channel, discord.TextChannel) else None
+                )
+                await ctx.send("📵 Fliphone was already unconfigured. Any webhook in this channel was cleaned up.")
+                return
 
-        ch_id = guild_cfg["channel_id"]
-        conn  = await self.db.get_connection(ch_id)
-        if conn:
-            other_cid = conn["channel_b"] if ch_id == conn["channel_a"] else conn["channel_a"]
-            await self.db.remove_connection(conn["id"])
-            pb_cog = self.bot.get_cog("Phonebooth")
-            if pb_cog and hasattr(pb_cog, "_invalidate_connection"):
-                pb_cog._invalidate_connection(conn)
-            other_ch = self.bot.get_channel(other_cid)
-            if other_ch:
-                try:
-                    await other_ch.send("📵 Other server has ended the call!")
-                except discord.HTTPException:
-                    pass
-
-        await self.db.remove_from_queue(ch_id)
-
-        try:
-            pb_channel = self.bot.get_channel(ch_id)
-            if pb_channel:
-                for wh in await pb_channel.webhooks():
-                    if wh.user == self.bot.user and wh.name == "Fliphone":
-                        await wh.delete(reason="Fliphone teardown")
-        except Exception:
-            pass
-
-        await self.db.delete_guild(ctx.guild.id)
-        pb_cog = self.bot.get_cog("Phonebooth")
-        if pb_cog and hasattr(pb_cog, "_invalidate_config"):
-            pb_cog._invalidate_config(guild_id=ctx.guild.id, channel_id=ch_id)
-        await ctx.send("📵 Fliphone removed. Run `f.setup` to set it up again.")
+            await self._clear_guild_setup_state(ctx.guild, notify_partner=True)
+            await ctx.send("📵 Fliphone was fully removed. Run `f.setup` in the channel you want to use.")
 
     # ── f.stats ───────────────────────────────────────────────────────────────
 
@@ -544,13 +569,7 @@ class Admin(commands.Cog, name="Admin"):
     @commands.hybrid_command(name="invite")
     async def invite(self, ctx: commands.Context) -> None:
         """Get the bot invite link."""
-        client_id = self.bot.user.id
-        url = (
-            f"https://discord.com/api/oauth2/authorize"
-            f"?client_id={client_id}"
-            f"&permissions={config.BOT_PERMISSIONS}"
-            f"&scope=bot"
-        )
+        url = self._invite_url(ctx.guild.id if ctx.guild else None)
         embed = discord.Embed(
             title="📞 Add Fliphone to Your Server",
             description=(

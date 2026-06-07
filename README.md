@@ -55,7 +55,9 @@ In the channel you want to use as the phonebooth, run:
 f.setup
 ```
 
-The bot verifies its required channel permissions, creates a webhook automatically, and registers that channel. Manage Webhooks is required.
+`f.setup` is also the reset button: it clears stale call/queue/room state, removes old Fliphone webhooks, creates a fresh webhook, saves the channel, and tests avatar delivery.
+
+If setup reports missing permissions, use the re-invite link it provides and run `f.setup` again. Use `f.teardown` only when you want to remove Fliphone completely.
 
 ### 3. Start a call
 
@@ -103,9 +105,9 @@ If another server is waiting, you connect instantly. Otherwise you join the queu
 
 | Command | Aliases | Permission | Description |
 |---|---|---|---|
-| `f.setup` | — | Manage Channels | Register this channel as the Fliphone channel |
+| `f.setup` | — | Manage Channels | Reset and fully configure this channel in one step |
 | `f.check` | `f.setupcheck`, `f.doctor` | Manage Channels | Diagnose setup, permissions, webhook, and call state |
-| `f.repair` | `f.fixsetup`, `f.fix` | Manage Channels | Repair the configured channel/webhook after `f.check` |
+| `f.repair` | `f.fixsetup`, `f.fix` | Manage Channels | Reset and rebuild the configured channel |
 | `f.dbstatus` | `f.database`, `f.db` | Manage Channels | Show database health and safe row counts |
 | `f.teardown` | `f.remove` | Manage Channels | Remove Fliphone from this server (clears all data) |
 | `f.blocklist` | `f.blocked` | Manage Channels | List servers your server has blocked |

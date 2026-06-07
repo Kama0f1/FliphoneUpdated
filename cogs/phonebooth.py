@@ -586,6 +586,32 @@ class Phonebooth(commands.Cog):
             cfg["webhook_url"] = webhook_url
         return webhook_url, []
 
+    async def rebuild_relay_webhook(
+        self,
+        channel: discord.TextChannel,
+    ) -> tuple[Optional[str], list[str]]:
+        """Delete old Fliphone webhooks and create one clean replacement."""
+        issues = self.relay_permission_issues(channel)
+        if issues:
+            return None, issues
+
+        try:
+            for webhook in await channel.webhooks():
+                if webhook.user == self.bot.user and webhook.name == "Fliphone":
+                    self._wh_obj_cache.pop(webhook.url, None)
+                    await webhook.delete(reason="Fliphone setup reset")
+            webhook_url = (await channel.create_webhook(name="Fliphone")).url
+        except discord.Forbidden:
+            return None, ["Manage Webhooks"]
+        except discord.HTTPException:
+            return None, ["Discord webhook creation failed"]
+
+        await self.db.update_webhook(channel.id, webhook_url)
+        cfg = self._cfg_by_channel.get(channel.id)
+        if cfg is not None:
+            cfg["webhook_url"] = webhook_url
+        return webhook_url, []
+
     async def probe_webhook_avatar(
         self,
         channel: discord.TextChannel,
@@ -639,7 +665,7 @@ class Phonebooth(commands.Cog):
                     await partner_channel.send(
                         "⚠️ Fliphone removed this server from the queue because webhook relay is unavailable.\n"
                         f"Missing or broken: **{', '.join(issues)}**\n"
-                        "A server admin must run `f.check`, fix the listed permissions, then run `f.repair`."
+                        "A server admin should run `f.setup` in this channel."
                     )
                 except discord.HTTPException:
                     pass
@@ -667,7 +693,7 @@ class Phonebooth(commands.Cog):
             notice = (
                 "⚠️ **Call ended because webhook relay became unavailable.**\n"
                 "No messages were sent using the plain bot fallback. "
-                "A server admin should run `f.check`, fix any missing permissions, then run `f.repair`."
+                "A server admin should run `f.setup` in the configured channel."
             )
             for channel_id in (conn["channel_a"], conn["channel_b"]):
                 channel = self.bot.get_channel(channel_id)
@@ -1158,7 +1184,7 @@ class Phonebooth(commands.Cog):
             await ctx.send(
                 "❌ Fliphone cannot start a call because webhook relay is unavailable.\n"
                 f"Missing or broken: **{', '.join(permission_issues)}**\n"
-                "A server admin must run `f.check`, fix the listed permissions, then run `f.repair`."
+                "A server admin should run `f.setup` in this channel."
             )
             return
         match = await self._get_valid_queue_match(ctx.guild.id, ctx.channel.id)
@@ -1370,7 +1396,7 @@ class Phonebooth(commands.Cog):
             await ctx.send(
                 "❌ Fliphone cannot search for a new call because webhook relay is unavailable.\n"
                 f"Missing or broken: **{', '.join(permission_issues)}**\n"
-                "A server admin must run `f.check`, fix the listed permissions, then run `f.repair`."
+                "A server admin should run `f.setup` in this channel."
             )
             return
         match = await self._get_valid_queue_match(ctx.guild.id, ctx.channel.id)

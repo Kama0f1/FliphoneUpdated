@@ -871,7 +871,7 @@ class Room(commands.Cog):
                     try:
                         await other_ch.send(
                             "⚠️ Room relay is paused for this server because its webhook is unavailable. "
-                            "An admin must run `f.check`, fix permissions, then run `f.repair`."
+                            "An admin should run `f.setup` in this channel."
                         )
                         self._broken_webhook_notified.add(other["channel_id"])
                     except discord.HTTPException:
@@ -909,7 +909,7 @@ class Room(commands.Cog):
                     try:
                         await other_ch.send(
                             "⚠️ Room relay stopped for this server because webhook repair failed. "
-                            "An admin must run `f.check`, fix permissions, then run `f.repair`."
+                            "An admin should run `f.setup` in this channel."
                         )
                         self._broken_webhook_notified.add(other["channel_id"])
                     except discord.HTTPException:
@@ -1024,7 +1024,7 @@ class Room(commands.Cog):
             await ctx.send(
                 "❌ Fliphone cannot join a room because webhook relay is unavailable.\n"
                 f"Missing or broken: **{', '.join(permission_issues)}**\n"
-                "A server admin must run `f.check`, fix the listed permissions, then run `f.repair`."
+                "A server admin should run `f.setup` in this channel."
             )
             return
 
