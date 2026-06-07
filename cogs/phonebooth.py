@@ -511,11 +511,8 @@ class Phonebooth(commands.Cog):
         self._clear_rl_state(channel_a)
         self._clear_rl_state(channel_b)
         msg = (
-            f"📵 Call ended due to {self.INACTIVITY_MINUTES} minutes of inactivity.\n"
-            f"Want to report this call or give a suggestion? "
-            f"[Join the support server](<https://discord.gg/t3KHGqPuEP>)\n"
-            f"[Vote for us](<https://top.gg/bot/1489342959974486158/vote>)\n"
-            f"Use `f.call` to start a new call!"
+            f"📵 Call ended after {self.INACTIVITY_MINUTES} minutes of inactivity.\n"
+            "Use `f.call` to start a new call."
         )
         for ch_id in (channel_a, channel_b):
             ch = self.bot.get_channel(ch_id)
@@ -879,10 +876,8 @@ class Phonebooth(commands.Cog):
             report_embed = discord.Embed(
                 title="🚩 GIF Safety Check",
                 description=(
-                    "A GIF was sent in this call.\n"
-                    "If it contains inappropriate content, tap the button.\n"
-                    "It will be **immediately removed** and flagged for review.\n"
-                    "*(Verified safe GIFs cannot be reported.)*"
+                    "Report this GIF if it breaks the rules.\n"
+                    "Safe/approved GIFs cannot be reported."
                 ),
                 color=0x2b2d31,
             )
@@ -1366,20 +1361,14 @@ class Phonebooth(commands.Cog):
         self._clear_rl_state(conn["channel_b"])
         await ctx.send(
             f"📵 Call ended. Duration: **{duration}** · Messages: **{msg_count}**\n"
-            f"Want to report this call or give a suggestion? "
-            f"[Join the support server](<https://discord.gg/t3KHGqPuEP>)\n"
-            f"[Vote for us](<https://top.gg/bot/1489342959974486158/vote>)\n"
-            f"Use `f.call` to dial again!"
+            "Use `f.call` to start a new call."
         )
         other = self.bot.get_channel(other_cid)
         if other:
             try:
                 await other.send(
-                    f"📵 Other server has ended the call!\n"
-                    f"Want to report this call or give a suggestion? "
-                    f"[Join the support server](<https://discord.gg/t3KHGqPuEP>)\n"
-                    f"[Vote for us](<https://top.gg/bot/1489342959974486158/vote>)\n"
-                    f"Use `f.call` to find someone new."
+                    "📵 The other server ended the call.\n"
+                    "Use `f.call` to start a new call."
                 )
             except discord.HTTPException:
                 pass
@@ -1428,8 +1417,7 @@ class Phonebooth(commands.Cog):
                 try:
                     await other_ch.send(
                         "📵 The other user skipped.\n"
-                        "Want to report this call? [Join the support server](https://discord.gg/t3KHGqPuEP)\n"
-                        "Use `f.call` to find someone new!"
+                        "Use `f.call` to start a new call."
                     )
                 except discord.HTTPException:
                     pass
