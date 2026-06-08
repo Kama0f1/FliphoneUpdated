@@ -273,6 +273,7 @@ class PhoneboothBot(commands.AutoShardedBot):
             self._format_guild_owner(guild),
             guild.member_count,
         )
+        await self.db.delete_guild(guild.id)
         await self._update_presence()
         await self._post_topgg_stats()
 

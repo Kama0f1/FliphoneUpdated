@@ -566,12 +566,19 @@ class Admin(commands.Cog, name="Admin"):
     @commands.command(name="stats")
     async def stats(self, ctx: commands.Context) -> None:
         """Display global Fliphone statistics."""
+        configured_guild_ids = set(await self.db.get_configured_guild_ids())
+        current_guild_ids = {guild.id for guild in self.bot.guilds}
+        active_configured = len(configured_guild_ids & current_guild_ids)
+        stale_configs = len(configured_guild_ids - current_guild_ids)
+
         embed = discord.Embed(title="📊 Fliphone — Statistics", color=config.COLOR_WAIT, timestamp=datetime.utcnow())
         embed.add_field(name="🔴 Active Calls",       value=str(await self.db.get_active_connection_count()), inline=True)
         embed.add_field(name="⏳ In Queue",           value=str(await self.db.get_queue_size()),              inline=True)
         embed.add_field(name="📚 All-Time Calls",     value=str(await self.db.get_total_calls()),             inline=True)
-        embed.add_field(name="🏠 Configured Servers", value=str(await self.db.get_total_guilds()),            inline=True)
+        embed.add_field(name="🏠 Configured Servers", value=str(active_configured),                           inline=True)
         embed.add_field(name="🤖 Bot In Servers",     value=str(len(self.bot.guilds)),                       inline=True)
+        if stale_configs:
+            embed.add_field(name="Old Configs", value=str(stale_configs), inline=True)
         embed.set_footer(text=config.FOOTER)
         await ctx.send(embed=embed)
 

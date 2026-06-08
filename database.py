@@ -794,6 +794,10 @@ class Database:
     async def get_total_guilds(self) -> int:
         return int(await self._fetchval("SELECT COUNT(*) FROM guild_config") or 0)
 
+    async def get_configured_guild_ids(self) -> list[int]:
+        rows = await self._fetchall("SELECT guild_id FROM guild_config")
+        return [int(row["guild_id"]) for row in rows]
+
     async def block_guild(self, guild_id: int, blocked_id: int, user_id: int) -> None:
         await self._execute(
             """
