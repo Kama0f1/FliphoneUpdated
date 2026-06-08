@@ -1783,25 +1783,28 @@ class Phonebooth(commands.Cog):
         else:
             embed.add_field(name="Status", value="Use `f.profile` in a server to show channel status.", inline=False)
 
-        banner_file = await self._attach_profile_banner(ctx.author.id, embed)
+        banner_embed, banner_file = await self._profile_banner_payload(ctx.author.id, embed.color.value)
         embed.set_footer(text=f"Use f.banner to reroll your banner • {config.FOOTER}")
-        if banner_file:
-            await ctx.send(embed=embed, file=banner_file)
+        if banner_embed and banner_file:
+            await ctx.send(embeds=[banner_embed, embed], file=banner_file)
         else:
             await ctx.send(embed=embed)
 
-    async def _attach_profile_banner(self, user_id: int, embed: discord.Embed) -> Optional[discord.File]:
+    async def _profile_banner_payload(
+        self, user_id: int, color: int
+    ) -> tuple[Optional[discord.Embed], Optional[discord.File]]:
         banners = _profile_banner_files()
         if not banners:
-            return None
+            return None, None
         saved_index = await self.db.get_profile_banner(user_id)
         index = saved_index if saved_index is not None else _fallback_banner_index(user_id, len(banners))
         if index < 0 or index >= len(banners):
             index = _fallback_banner_index(user_id, len(banners))
         banner = banners[index]
         filename = f"profile_banner{banner.suffix.lower()}"
-        embed.set_image(url=f"attachment://{filename}")
-        return discord.File(banner, filename=filename)
+        banner_embed = discord.Embed(color=color)
+        banner_embed.set_image(url=f"attachment://{filename}")
+        return banner_embed, discord.File(banner, filename=filename)
 
     @commands.command(name="banner", aliases=["profilebanner"])
     async def banner(self, ctx: commands.Context, action: Optional[str] = None) -> None:
@@ -1818,10 +1821,10 @@ class Phonebooth(commands.Cog):
                 description="Your profile banner is back to your stable default.",
                 color=config.COLOR_OK,
             )
-            banner_file = await self._attach_profile_banner(ctx.author.id, embed)
+            banner_embed, banner_file = await self._profile_banner_payload(ctx.author.id, embed.color.value)
             embed.set_footer(text=config.FOOTER)
-            if banner_file:
-                await ctx.send(embed=embed, file=banner_file)
+            if banner_embed and banner_file:
+                await ctx.send(embeds=[banner_embed, embed], file=banner_file)
             else:
                 await ctx.send(embed=embed)
             return
@@ -1842,10 +1845,10 @@ class Phonebooth(commands.Cog):
             description="Your new banner has been saved.",
             color=config.COLOR_OK,
         )
-        banner_file = await self._attach_profile_banner(ctx.author.id, embed)
+        banner_embed, banner_file = await self._profile_banner_payload(ctx.author.id, embed.color.value)
         embed.set_footer(text="Run f.profile to see your full profile.")
-        if banner_file:
-            await ctx.send(embed=embed, file=banner_file)
+        if banner_embed and banner_file:
+            await ctx.send(embeds=[banner_embed, embed], file=banner_file)
         else:
             await ctx.send(embed=embed)
 
