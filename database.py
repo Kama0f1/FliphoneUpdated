@@ -35,6 +35,8 @@ TABLE_ORDER = [
     "gif_reports",
     "notify_subscribers",
     "profile_banners",
+    "user_chat_stats",
+    "server_chat_stats",
     "gif_url_list",
     "gif_mode_settings",
     "rooms",
@@ -141,6 +143,28 @@ CREATE TABLE IF NOT EXISTS profile_banners (
     banner_index INTEGER NOT NULL,
     updated_at   TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS user_chat_stats (
+    user_id       INTEGER PRIMARY KEY,
+    xp            INTEGER NOT NULL DEFAULT 0,
+    message_count INTEGER NOT NULL DEFAULT 0,
+    last_xp_at    TEXT,
+    updated_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_user_chat_stats_rank
+    ON user_chat_stats (xp DESC, message_count DESC);
+
+CREATE TABLE IF NOT EXISTS server_chat_stats (
+    guild_id      INTEGER NOT NULL,
+    user_id       INTEGER NOT NULL,
+    xp            INTEGER NOT NULL DEFAULT 0,
+    message_count INTEGER NOT NULL DEFAULT 0,
+    last_xp_at    TEXT,
+    updated_at    TEXT NOT NULL,
+    PRIMARY KEY (guild_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_server_chat_stats_rank
+    ON server_chat_stats (guild_id, xp DESC, message_count DESC);
 
 CREATE TABLE IF NOT EXISTS scheduled_jobs (
     job_key     TEXT PRIMARY KEY,
@@ -287,6 +311,28 @@ CREATE TABLE IF NOT EXISTS profile_banners (
     banner_index INTEGER NOT NULL,
     updated_at   TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS user_chat_stats (
+    user_id       BIGINT PRIMARY KEY,
+    xp            INTEGER NOT NULL DEFAULT 0,
+    message_count INTEGER NOT NULL DEFAULT 0,
+    last_xp_at    TEXT,
+    updated_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_user_chat_stats_rank
+    ON user_chat_stats (xp DESC, message_count DESC);
+
+CREATE TABLE IF NOT EXISTS server_chat_stats (
+    guild_id      BIGINT NOT NULL,
+    user_id       BIGINT NOT NULL,
+    xp            INTEGER NOT NULL DEFAULT 0,
+    message_count INTEGER NOT NULL DEFAULT 0,
+    last_xp_at    TEXT,
+    updated_at    TEXT NOT NULL,
+    PRIMARY KEY (guild_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_server_chat_stats_rank
+    ON server_chat_stats (guild_id, xp DESC, message_count DESC);
 
 CREATE TABLE IF NOT EXISTS scheduled_jobs (
     job_key     TEXT PRIMARY KEY,
@@ -1047,6 +1093,144 @@ class Database:
 
     async def reset_profile_banner(self, user_id: int) -> None:
         await self._execute("DELETE FROM profile_banners WHERE user_id = ?", (user_id,))
+
+    @staticmethod
+    def _seconds_since(timestamp: Optional[str]) -> float:
+        if not timestamp:
+            return 10**9
+        try:
+            return (datetime.utcnow() - datetime.fromisoformat(timestamp)).total_seconds()
+        except (TypeError, ValueError):
+            return 10**9
+
+    async def add_chat_xp(
+        self,
+        user_id: int,
+        guild_id: int,
+        amount: int,
+        cooldown_seconds: int,
+    ) -> Optional[dict]:
+        row = await self._fetchrow(
+            "SELECT last_xp_at FROM user_chat_stats WHERE user_id = ?",
+            (user_id,),
+        )
+        if row and self._seconds_since(row["last_xp_at"]) < cooldown_seconds:
+            return None
+
+        now = datetime.utcnow().isoformat()
+        await self._execute(
+            """
+            INSERT INTO user_chat_stats (user_id, xp, message_count, last_xp_at, updated_at)
+            VALUES (?, ?, 1, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                xp = user_chat_stats.xp + excluded.xp,
+                message_count = user_chat_stats.message_count + 1,
+                last_xp_at = excluded.last_xp_at,
+                updated_at = excluded.updated_at
+            """,
+            (user_id, amount, now, now),
+        )
+        await self._execute(
+            """
+            INSERT INTO server_chat_stats (guild_id, user_id, xp, message_count, last_xp_at, updated_at)
+            VALUES (?, ?, ?, 1, ?, ?)
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                xp = server_chat_stats.xp + excluded.xp,
+                message_count = server_chat_stats.message_count + 1,
+                last_xp_at = excluded.last_xp_at,
+                updated_at = excluded.updated_at
+            """,
+            (guild_id, user_id, amount, now, now),
+        )
+        return await self.get_chat_profile(user_id, guild_id)
+
+    async def get_chat_profile(self, user_id: int, guild_id: Optional[int] = None) -> dict:
+        row = await self._fetchrow(
+            "SELECT xp, message_count FROM user_chat_stats WHERE user_id = ?",
+            (user_id,),
+        )
+        xp = int(row["xp"]) if row else 0
+        message_count = int(row["message_count"]) if row else 0
+        global_rank = None
+        if message_count:
+            global_rank = int(
+                await self._fetchval(
+                    """
+                    SELECT COUNT(*) + 1
+                    FROM user_chat_stats
+                    WHERE xp > ?
+                       OR (xp = ? AND message_count > ?)
+                       OR (xp = ? AND message_count = ? AND user_id < ?)
+                    """,
+                    (xp, xp, message_count, xp, message_count, user_id),
+                )
+                or 1
+            )
+
+        server_xp = 0
+        server_messages = 0
+        server_rank = None
+        if guild_id is not None:
+            server_row = await self._fetchrow(
+                """
+                SELECT xp, message_count
+                FROM server_chat_stats
+                WHERE guild_id = ? AND user_id = ?
+                """,
+                (guild_id, user_id),
+            )
+            server_xp = int(server_row["xp"]) if server_row else 0
+            server_messages = int(server_row["message_count"]) if server_row else 0
+            if server_messages:
+                server_rank = int(
+                    await self._fetchval(
+                        """
+                        SELECT COUNT(*) + 1
+                        FROM server_chat_stats
+                        WHERE guild_id = ?
+                          AND (
+                              xp > ?
+                              OR (xp = ? AND message_count > ?)
+                              OR (xp = ? AND message_count = ? AND user_id < ?)
+                          )
+                        """,
+                        (guild_id, server_xp, server_xp, server_messages, server_xp, server_messages, user_id),
+                    )
+                    or 1
+                )
+
+        return {
+            "xp": xp,
+            "message_count": message_count,
+            "global_rank": global_rank,
+            "server_xp": server_xp,
+            "server_message_count": server_messages,
+            "server_rank": server_rank,
+        }
+
+    async def get_chat_leaderboard(self, limit: int = 10, guild_id: Optional[int] = None) -> list[dict]:
+        limit = max(1, min(int(limit), 25))
+        if guild_id is None:
+            return await self._fetchall(
+                """
+                SELECT user_id, xp, message_count
+                FROM user_chat_stats
+                WHERE message_count > 0
+                ORDER BY xp DESC, message_count DESC, user_id ASC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+        return await self._fetchall(
+            """
+            SELECT user_id, xp, message_count
+            FROM server_chat_stats
+            WHERE guild_id = ? AND message_count > 0
+            ORDER BY xp DESC, message_count DESC, user_id ASC
+            LIMIT ?
+            """,
+            (guild_id, limit),
+        )
 
     async def claim_scheduled_job(self, job_key: str, interval_seconds: float) -> bool:
         """

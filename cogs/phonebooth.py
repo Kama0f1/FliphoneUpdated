@@ -61,6 +61,9 @@ UNICODE_EMOJI_PATTERN = re.compile(
 )
 MAX_EMOJIS_PER_MESSAGE = 10
 PROFILE_BANNER_DIR = Path(__file__).resolve().parents[1] / "assets" / "profile_banners"
+CHAT_XP_COOLDOWN_SECONDS = 60
+CHAT_XP_MIN = 12
+CHAT_XP_MAX = 22
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -130,6 +133,28 @@ def _profile_banner_files() -> list[Path]:
 
 def _fallback_banner_index(user_id: int, banner_count: int) -> int:
     return int(user_id) % banner_count if banner_count else 0
+
+
+def _level_from_xp(total_xp: int) -> tuple[int, int, int]:
+    level = 1
+    remaining = max(0, int(total_xp))
+    needed = 100
+    while remaining >= needed:
+        remaining -= needed
+        level += 1
+        needed = 100 + (level - 1) * 50
+    return level, remaining, needed
+
+
+def _xp_bar(current: int, needed: int, width: int = 10) -> str:
+    if needed <= 0:
+        return "▰" * width
+    filled = min(width, max(0, round((current / needed) * width)))
+    return "▰" * filled + "▱" * (width - filled)
+
+
+def _rank_label(rank: Optional[int]) -> str:
+    return f"#{rank:,}" if rank else "Unranked"
 
 
 def _limit_unicode_emojis(text: str, limit: int = MAX_EMOJIS_PER_MESSAGE) -> tuple[str, bool]:
@@ -1255,6 +1280,14 @@ class Phonebooth(commands.Cog):
                         reply_embed=reply_embed, wait=need_id, silent=bool(reportable_gif_urls),
                     )
             if main_wh_msg:
+                asyncio.create_task(
+                    self.db.add_chat_xp(
+                        message.author.id,
+                        message.guild.id,
+                        random.randint(CHAT_XP_MIN, CHAT_XP_MAX),
+                        CHAT_XP_COOLDOWN_SECONDS,
+                    )
+                )
                 # GIF report cards
                 if reportable_gif_urls:
                     target_ch = self.bot.get_channel(target_cid)
@@ -1724,48 +1757,17 @@ class Phonebooth(commands.Cog):
     @commands.command(name="profile", aliases=["settings", "me"])
     async def profile(self, ctx: commands.Context) -> None:
         """Show your Fliphone user settings and current server/channel state."""
-        notify_enabled, is_banned = await asyncio.gather(
+        guild_id = ctx.guild.id if ctx.guild else None
+        notify_enabled, is_banned, chat_stats = await asyncio.gather(
             self.db.get_notify_status(ctx.author.id),
             self.db.is_user_banned(ctx.author.id),
+            self.db.get_chat_profile(ctx.author.id, guild_id),
         )
-
-        settings_lines = [
-            f"Notify: {'On' if notify_enabled else 'Off'}",
-            f"Access: {'Banned' if is_banned else 'OK'}",
-        ]
-        server_lines = ["Setup: Not configured", "GIF: -", "Anon: -"]
-        status_text = "Use f.profile in a server to show channel status."
-        if ctx.guild:
-            guild_cfg, conn, q, room_member = await asyncio.gather(
-                self._get_guild_config_cached(ctx.guild.id),
-                self._get_connection_cached(ctx.channel.id),
-                self.db.get_queue_entry(ctx.channel.id),
-                self.db.get_room_member(ctx.channel.id),
-            )
-            if guild_cfg:
-                channel = self.bot.get_channel(guild_cfg["channel_id"])
-                current_mode = await self.db.get_gif_mode(ctx.guild.id)
-                setup_text = f"Healthy ({channel.mention})" if channel else "Channel missing"
-                server_lines = [
-                    f"Setup: {setup_text}",
-                    f"GIF: {current_mode}",
-                    f"Anon: {'On' if guild_cfg.get('anonymous') else 'Off'}",
-                ]
-
-            if conn:
-                status_text = f"In a 1:1 call for {_duration_str(conn['started_at'])}"
-            elif room_member:
-                status_text = f"In room #{room_member['room_id']} as Station {room_member['station']}"
-            elif q:
-                status_text = f"Waiting in queue for {_duration_str(q['joined_at'])}"
-            else:
-                status_text = "Idle"
 
         view, banner_file = await self._profile_components(
             ctx.author,
-            settings_lines,
-            server_lines,
-            status_text,
+            chat_stats,
+            notify_enabled,
             is_banned,
         )
         if banner_file:
@@ -1794,9 +1796,8 @@ class Phonebooth(commands.Cog):
     async def _profile_components(
         self,
         member: discord.Member | discord.User,
-        settings_lines: list[str],
-        server_lines: list[str],
-        status_text: str,
+        chat_stats: dict,
+        notify_enabled: bool,
         is_banned: bool,
     ) -> tuple[discord.ui.LayoutView, Optional[discord.File]]:
         view = discord.ui.LayoutView(timeout=None)
@@ -1820,16 +1821,53 @@ class Phonebooth(commands.Cog):
             )
         )
         container.add_item(discord.ui.Separator())
+        level, current_xp, needed_xp = _level_from_xp(int(chat_stats["xp"]))
+        rank_text = _rank_label(chat_stats.get("global_rank"))
+        server_rank = chat_stats.get("server_rank")
+        server_rank_text = f"\n**Server Rank:** {_rank_label(server_rank)}" if server_rank else ""
         container.add_item(
             discord.ui.TextDisplay(
-                f"**Settings:** {' • '.join(settings_lines)}\n"
-                f"**Server:** {' • '.join(server_lines)}\n"
-                f"**Status:** {status_text}\n"
-                "-# Use `f.banner` to reroll your banner"
+                f"**Level {level}** • **Global Rank:** {rank_text}{server_rank_text}\n"
+                f"**XP:** {int(chat_stats['xp']):,} total • {current_xp:,}/{needed_xp:,} to next\n"
+                f"`{_xp_bar(current_xp, needed_xp)}`\n"
+                f"**Chats:** {int(chat_stats['message_count']):,} • **Notify:** {'On' if notify_enabled else 'Off'}\n"
+                "-# `f.banner` rerolls your banner"
             )
         )
         view.add_item(container)
         return view, banner_file
+
+    def _leaderboard_embed(self, rows: list[dict], *, title: str) -> discord.Embed:
+        embed = discord.Embed(title=title, color=config.COLOR_WAIT)
+        if not rows:
+            embed.description = "No chat XP yet. Start talking in Fliphone calls to rank up."
+            return embed
+
+        lines = []
+        for index, row in enumerate(rows, start=1):
+            level, _, _ = _level_from_xp(int(row["xp"]))
+            lines.append(
+                f"**#{index}** <@{int(row['user_id'])}> "
+                f"• Level **{level}** "
+                f"• **{int(row['xp']):,} XP** "
+                f"• {int(row['message_count']):,} chats"
+            )
+        embed.description = "\n".join(lines)
+        embed.set_footer(text="XP is earned from real relayed call messages.")
+        return embed
+
+    @commands.command(name="leaderboard", aliases=["lb", "levels", "rankings"])
+    async def leaderboard(self, ctx: commands.Context) -> None:
+        """Show the global Fliphone chat XP leaderboard."""
+        rows = await self.db.get_chat_leaderboard(limit=10)
+        await ctx.send(embed=self._leaderboard_embed(rows, title="Fliphone Global Leaderboard"))
+
+    @commands.command(name="serverlb", aliases=["slb", "serverleaderboard"])
+    @commands.guild_only()
+    async def serverlb(self, ctx: commands.Context) -> None:
+        """Show this server's Fliphone chat XP leaderboard."""
+        rows = await self.db.get_chat_leaderboard(limit=10, guild_id=ctx.guild.id)
+        await ctx.send(embed=self._leaderboard_embed(rows, title=f"{ctx.guild.name} Leaderboard"))
 
     @commands.command(name="banner", aliases=["profilebanner"])
     async def banner(self, ctx: commands.Context, action: Optional[str] = None) -> None:

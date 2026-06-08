@@ -219,7 +219,7 @@ pip install -r requirements.txt
 python scripts/migrate_sqlite_to_postgres.py --sqlite-path phonebooth.db
 ```
 
-The migration script creates a clean SQLite snapshot first, copies all 14 tables into PostgreSQL, resets identity sequences, and prints row counts only. It will refuse to copy into a non-empty PostgreSQL database unless you pass `--clear-postgres`.
+The migration script creates a clean SQLite snapshot first, copies all tracked tables into PostgreSQL, resets identity sequences, and prints row counts only. It will refuse to copy into a non-empty PostgreSQL database unless you pass `--clear-postgres`.
 
 After the migration succeeds, keep `DATABASE_URL` set and start the bot with `python main.py`. Leave the old Heavencloud bot offline so new data does not split across two databases again.
 
@@ -270,6 +270,9 @@ Enable these in the [Discord Developer Portal](https://discord.com/developers/ap
 | `banned_users` | Bot-wide user ban list |
 | `custom_words` | Custom censor words added via `f.censor` |
 | `gif_reports` | GIF URLs reported by users, pending review |
+| `profile_banners` | Saved user profile banner choices |
+| `user_chat_stats` | Global user XP, chat count, and ranking data |
+| `server_chat_stats` | Per-server user XP and leaderboard data |
 | `gif_url_list` | Blacklisted and whitelisted GIF URLs |
 | `gif_mode_settings` | Per-server GIF mode (enabled/limited/disabled) |
 | `rooms` | Group room sessions |
