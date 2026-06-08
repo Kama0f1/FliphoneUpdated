@@ -124,10 +124,20 @@ def _render_user_mentions(text: str, guild: discord.Guild | None) -> str:
 def _profile_banner_files() -> list[Path]:
     if not PROFILE_BANNER_DIR.exists():
         return []
+
+    def _banner_sort_key(path: Path) -> tuple[int, str]:
+        try:
+            return int(path.stem.rsplit("_", 1)[-1]), path.name
+        except ValueError:
+            return 0, path.name
+
     return sorted(
-        path
-        for path in PROFILE_BANNER_DIR.iterdir()
-        if path.suffix.lower() in {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+        (
+            path
+            for path in PROFILE_BANNER_DIR.iterdir()
+            if path.suffix.lower() in {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+        ),
+        key=_banner_sort_key,
     )
 
 
