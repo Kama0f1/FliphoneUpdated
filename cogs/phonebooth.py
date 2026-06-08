@@ -1730,10 +1730,10 @@ class Phonebooth(commands.Cog):
         )
 
         settings_lines = [
-            f"Notifications: {'On' if notify_enabled else 'Off'}",
+            f"Notify: {'On' if notify_enabled else 'Off'}",
             f"Access: {'Banned' if is_banned else 'OK'}",
         ]
-        server_lines = ["Setup: Not configured", "GIF mode: -", "Anonymous: -"]
+        server_lines = ["Setup: Not configured", "GIF: -", "Anon: -"]
         status_text = "Use f.profile in a server to show channel status."
         if ctx.guild:
             guild_cfg, conn, q, room_member = await asyncio.gather(
@@ -1748,8 +1748,8 @@ class Phonebooth(commands.Cog):
                 setup_text = f"Healthy ({channel.mention})" if channel else "Channel missing"
                 server_lines = [
                     f"Setup: {setup_text}",
-                    f"GIF mode: {current_mode}",
-                    f"Anonymous: {'On' if guild_cfg.get('anonymous') else 'Off'}",
+                    f"GIF: {current_mode}",
+                    f"Anon: {'On' if guild_cfg.get('anonymous') else 'Off'}",
                 ]
 
             if conn:
@@ -1815,23 +1815,17 @@ class Phonebooth(commands.Cog):
         display_name = _relay_display_name(member)
         container.add_item(
             discord.ui.Section(
-                f"**{display_name}**\nFliphone Profile",
+                f"**{display_name}**",
                 accessory=discord.ui.Thumbnail(_get_avatar_url(member), description=f"{display_name}'s avatar"),
             )
         )
         container.add_item(discord.ui.Separator())
         container.add_item(
             discord.ui.TextDisplay(
-                "**Settings**\n"
-                + "\n".join(settings_lines)
-                + "\n\n"
-                + "**Server**\n"
-                + "\n".join(server_lines)
-                + "\n\n"
-                + "**Status**\n"
-                + status_text
-                + "\n\n"
-                + f"Use `f.banner` to reroll your banner • {config.FOOTER}"
+                f"**Settings:** {' • '.join(settings_lines)}\n"
+                f"**Server:** {' • '.join(server_lines)}\n"
+                f"**Status:** {status_text}\n"
+                "-# Use `f.banner` to reroll your banner"
             )
         )
         view.add_item(container)
