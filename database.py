@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS connections (
     guild_b     INTEGER NOT NULL,
     webhook_b   TEXT,
     started_at  TEXT NOT NULL,
+    last_activity_at TEXT,
     msg_count   INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_conn_a ON connections (channel_a);
@@ -170,6 +171,7 @@ CREATE TABLE IF NOT EXISTS room_members (
     webhook_url TEXT,
     station     TEXT NOT NULL,
     joined_at   TEXT NOT NULL,
+    last_activity_at TEXT,
     msg_count   INTEGER NOT NULL DEFAULT 0,
     UNIQUE(channel_id)
 );
@@ -217,6 +219,7 @@ CREATE TABLE IF NOT EXISTS connections (
     guild_b     BIGINT NOT NULL,
     webhook_b   TEXT,
     started_at  TEXT NOT NULL,
+    last_activity_at TEXT,
     msg_count   INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_conn_a ON connections (channel_a);
@@ -308,6 +311,7 @@ CREATE TABLE IF NOT EXISTS room_members (
     webhook_url TEXT,
     station     TEXT NOT NULL,
     joined_at   TEXT NOT NULL,
+    last_activity_at TEXT,
     msg_count   INTEGER NOT NULL DEFAULT 0,
     UNIQUE(channel_id)
 );
@@ -378,6 +382,7 @@ class Database:
                 statement_cache_size=config.PG_STATEMENT_CACHE_SIZE,
             )
             await self._execute_script(POSTGRES_SCHEMA)
+            await self._ensure_runtime_columns()
             return
 
         self._conn = await aiosqlite.connect(self.path)
@@ -389,6 +394,7 @@ class Database:
         await self._conn.execute("PRAGMA mmap_size = 134217728;")
         await self._conn.executescript(SQLITE_SCHEMA)
         await self._conn.commit()
+        await self._ensure_runtime_columns()
 
     async def close(self) -> None:
         conn = self._conn
@@ -431,6 +437,35 @@ class Database:
             return
         await self._conn.executescript(sql)
         await self._conn.commit()
+
+    async def _has_column(self, table: str, column: str) -> bool:
+        if self.backend == "postgres":
+            return bool(
+                await self._fetchval(
+                    """
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_name = ? AND column_name = ?
+                    """,
+                    (table, column),
+                )
+            )
+
+        async with self._conn.execute(f"PRAGMA table_info({table})") as cur:
+            rows = await cur.fetchall()
+        return any(row[1] == column for row in rows)
+
+    async def _ensure_runtime_columns(self) -> None:
+        runtime_columns = (
+            ("connections", "last_activity_at", "started_at"),
+            ("room_members", "last_activity_at", "joined_at"),
+        )
+        for table, column, fallback_column in runtime_columns:
+            if not await self._has_column(table, column):
+                await self._execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
+            await self._execute(
+                f"UPDATE {table} SET {column} = {fallback_column} WHERE {column} IS NULL"
+            )
 
     async def _execute(self, sql: str, params: Sequence[Any] = ()) -> int:
         if self.backend == "postgres":
@@ -578,6 +613,9 @@ class Database:
     async def get_queue_entry(self, channel_id: int) -> Optional[dict]:
         return await self._fetchrow("SELECT * FROM queue WHERE channel_id = ?", (channel_id,))
 
+    async def get_all_queue_entries(self) -> list[dict]:
+        return await self._fetchall("SELECT * FROM queue ORDER BY joined_at ASC")
+
     async def get_queue_match(self, guild_id: int, channel_id: int) -> Optional[dict]:
         return await self._fetchrow(
             """
@@ -613,10 +651,10 @@ class Database:
         return await self._insert_returning_id(
             """
             INSERT INTO connections
-                (channel_a, guild_a, webhook_a, channel_b, guild_b, webhook_b, started_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (channel_a, guild_a, webhook_a, channel_b, guild_b, webhook_b, started_at, last_activity_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (channel_a, guild_a, webhook_a, channel_b, guild_b, webhook_b, started_at),
+            (channel_a, guild_a, webhook_a, channel_b, guild_b, webhook_b, started_at, started_at),
         )
 
     async def get_connection(self, channel_id: int) -> Optional[dict]:
@@ -625,10 +663,13 @@ class Database:
             (channel_id, channel_id),
         )
 
+    async def get_active_connections(self) -> list[dict]:
+        return await self._fetchall("SELECT * FROM connections ORDER BY started_at ASC")
+
     async def increment_message_count(self, connection_id: int) -> None:
         await self._execute(
-            "UPDATE connections SET msg_count = msg_count + 1 WHERE id = ?",
-            (connection_id,),
+            "UPDATE connections SET msg_count = msg_count + 1, last_activity_at = ? WHERE id = ?",
+            (datetime.utcnow().isoformat(), connection_id),
         )
 
     async def remove_connection(self, connection_id: int, ended_by: Optional[int] = None) -> Optional[dict]:
@@ -850,6 +891,11 @@ class Database:
     async def get_room_by_id(self, room_id: int) -> Optional[dict]:
         return await self._fetchrow("SELECT * FROM rooms WHERE id = ?", (room_id,))
 
+    async def get_open_rooms(self) -> list[dict]:
+        return await self._fetchall(
+            "SELECT * FROM rooms WHERE status IN ('waiting', 'active') ORDER BY created_at ASC"
+        )
+
     async def get_available_room(self, guild_id: int) -> Optional[dict]:
         return await self._fetchrow(
             """
@@ -877,14 +923,23 @@ class Database:
         webhook_url: Optional[str],
         station: str,
     ) -> None:
+        joined_at = datetime.utcnow().isoformat()
         await self._execute(
             """
             INSERT INTO room_members
-                (room_id, channel_id, guild_id, webhook_url, station, joined_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (room_id, channel_id, guild_id, webhook_url, station, joined_at, last_activity_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(channel_id) DO NOTHING
             """,
-            (room_id, channel_id, guild_id, webhook_url, station, datetime.utcnow().isoformat()),
+            (
+                room_id,
+                channel_id,
+                guild_id,
+                webhook_url,
+                station,
+                joined_at,
+                joined_at,
+            ),
         )
 
     async def get_room_member(self, channel_id: int) -> Optional[dict]:
@@ -920,8 +975,8 @@ class Database:
 
     async def increment_room_member_msg_count(self, channel_id: int) -> None:
         await self._execute(
-            "UPDATE room_members SET msg_count = msg_count + 1 WHERE channel_id = ?",
-            (channel_id,),
+            "UPDATE room_members SET msg_count = msg_count + 1, last_activity_at = ? WHERE channel_id = ?",
+            (datetime.utcnow().isoformat(), channel_id),
         )
 
     async def get_used_stations(self, room_id: int) -> list[str]:

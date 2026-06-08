@@ -149,6 +149,15 @@ def _duration_str(started_at: str) -> str:
     return f"{total // 60}m {total % 60}s"
 
 
+def _elapsed_seconds(timestamp: Optional[str]) -> float:
+    if not timestamp:
+        return 0.0
+    try:
+        return max(0.0, (datetime.utcnow() - datetime.fromisoformat(timestamp)).total_seconds())
+    except (TypeError, ValueError):
+        return 0.0
+
+
 # ── Vote-kick state + view ────────────────────────────────────────────────────
 
 class VoteKickState:
@@ -285,8 +294,14 @@ class Room(commands.Cog):
         # Active vote-kicks: room_id → VoteKickState
         self._active_votekicks: dict[int, VoteKickState] = {}
         self._broken_webhook_notified: set[int] = set()
+        self._recovery_task: asyncio.Task | None = None
+
+    async def cog_load(self) -> None:
+        self._recovery_task = asyncio.create_task(self._recover_runtime_state())
 
     def cog_unload(self) -> None:
+        if self._recovery_task:
+            self._recovery_task.cancel()
         for t in self._inactivity_tasks.values():
             t.cancel()
         for t in self._waiting_tasks.values():
@@ -330,12 +345,17 @@ class Room(commands.Cog):
 
     # ── Inactivity per member ─────────────────────────────────────────────────
 
-    def _reset_inactivity(self, channel_id: int, room_id: int) -> None:
+    def _reset_inactivity(
+        self,
+        channel_id: int,
+        room_id: int,
+        delay_seconds: Optional[float] = None,
+    ) -> None:
         old = self._inactivity_tasks.pop(channel_id, None)
         if old:
             old.cancel()
         self._inactivity_tasks[channel_id] = asyncio.create_task(
-            self._inactivity_timer(channel_id, room_id)
+            self._inactivity_timer(channel_id, room_id, delay_seconds)
         )
 
     def _cancel_inactivity(self, channel_id: int) -> None:
@@ -343,8 +363,14 @@ class Room(commands.Cog):
         if t:
             t.cancel()
 
-    async def _inactivity_timer(self, channel_id: int, room_id: int) -> None:
-        await asyncio.sleep(ROOM_INACTIVITY_MINUTES * 60)
+    async def _inactivity_timer(
+        self,
+        channel_id: int,
+        room_id: int,
+        delay_seconds: Optional[float] = None,
+    ) -> None:
+        delay = ROOM_INACTIVITY_MINUTES * 60 if delay_seconds is None else max(0.0, delay_seconds)
+        await asyncio.sleep(delay)
         rm = await self.db.get_room_member(channel_id)
         if not rm or rm["room_id"] != room_id:
             return
@@ -360,10 +386,10 @@ class Room(commands.Cog):
 
     # ── Waiting-room timeout ──────────────────────────────────────────────────
 
-    def _start_waiting_timeout(self, room_id: int) -> None:
+    def _start_waiting_timeout(self, room_id: int, delay_seconds: Optional[float] = None) -> None:
         self._cancel_waiting_timeout(room_id)
         self._waiting_tasks[room_id] = asyncio.create_task(
-            self._waiting_timer(room_id)
+            self._waiting_timer(room_id, delay_seconds)
         )
 
     def _cancel_waiting_timeout(self, room_id: int) -> None:
@@ -371,9 +397,10 @@ class Room(commands.Cog):
         if t:
             t.cancel()
 
-    async def _waiting_timer(self, room_id: int) -> None:
+    async def _waiting_timer(self, room_id: int, delay_seconds: Optional[float] = None) -> None:
         """Dissolve a waiting room if nobody else joins in time."""
-        await asyncio.sleep(ROOM_QUEUE_TIMEOUT_MINUTES * 60)
+        delay = ROOM_QUEUE_TIMEOUT_MINUTES * 60 if delay_seconds is None else max(0.0, delay_seconds)
+        await asyncio.sleep(delay)
         room = await self.db.get_room_by_id(room_id)
         if not room or room["status"] != "waiting":
             return
@@ -390,6 +417,75 @@ class Room(commands.Cog):
             await self.db.remove_room_member(m["channel_id"])
             self._cancel_inactivity(m["channel_id"])
         await self.db.close_room(room_id)
+
+    async def _recover_runtime_state(self) -> None:
+        """Resume or expire persisted room timers after a bot restart."""
+        await self.bot.wait_until_ready()
+        try:
+            await self._recover_open_rooms()
+        except Exception as exc:
+            print(f"[recovery] room recovery failed: {exc}")
+
+    async def _recover_open_rooms(self) -> None:
+        waiting_timeout = ROOM_QUEUE_TIMEOUT_MINUTES * 60
+        inactivity_timeout = ROOM_INACTIVITY_MINUTES * 60
+
+        for room in await self.db.get_open_rooms():
+            room_id = int(room["id"])
+            members = await self.db.get_room_members(room_id)
+            if not members:
+                await self.db.close_room(room_id)
+                continue
+
+            if room["status"] == "waiting":
+                if len(members) >= 2:
+                    await self.db.activate_room(room_id)
+                    room["status"] = "active"
+                else:
+                    elapsed = _elapsed_seconds(room.get("created_at"))
+                    if elapsed >= waiting_timeout:
+                        await self._waiting_timer(room_id, 0)
+                        continue
+                    self._start_waiting_timeout(room_id, waiting_timeout - elapsed)
+            elif len(members) < 2:
+                for member in members:
+                    channel = self.bot.get_channel(member["channel_id"])
+                    if channel:
+                        try:
+                            await channel.send(
+                                "📵 **Room closed** — not enough servers remaining.\n"
+                                "Use `f.room` to start a new one!"
+                            )
+                        except discord.HTTPException:
+                            pass
+                    await self.db.remove_room_member(member["channel_id"])
+                    self._cancel_inactivity(member["channel_id"])
+                await self.db.close_room(room_id)
+                continue
+
+            members = await self.db.get_room_members(room_id)
+            for member in members:
+                channel_id = int(member["channel_id"])
+                last_activity = member.get("last_activity_at") or member.get("joined_at")
+                elapsed = _elapsed_seconds(last_activity)
+                if elapsed >= inactivity_timeout:
+                    await self._remove_member(
+                        channel_id,
+                        room_id,
+                        broadcast_reason=f"📵 **Station {member['station']}** was removed for inactivity.",
+                        notify_leaver=True,
+                        leaver_msg=(
+                            f"📵 You were removed from the room due to **{ROOM_INACTIVITY_MINUTES} minutes** "
+                            "of inactivity. Use `f.room` to join a new one!"
+                        ),
+                    )
+                    current_room = await self.db.get_room_by_id(room_id)
+                    if not current_room or current_room["status"] == "closed":
+                        break
+                    continue
+                if not await self.db.get_room_member(channel_id):
+                    continue
+                self._reset_inactivity(channel_id, room_id, inactivity_timeout - elapsed)
 
     # ── Core: remove a member and handle room collapse ────────────────────────
 

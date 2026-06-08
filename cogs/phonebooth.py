@@ -68,6 +68,15 @@ def _duration_str(started_at: str) -> str:
     return f"{total // 60}m {total % 60}s"
 
 
+def _elapsed_seconds(timestamp: Optional[str]) -> float:
+    if not timestamp:
+        return 0.0
+    try:
+        return max(0.0, (datetime.utcnow() - datetime.fromisoformat(timestamp)).total_seconds())
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _anon_identity(seed: int) -> tuple[str, str]:
     rng = random.Random(seed)
     name = f"Stranger {rng.choice(config.ANON_NAMES)}"
@@ -320,15 +329,19 @@ class Phonebooth(commands.Cog):
         self._session: aiohttp.ClientSession | None = None
         self._wh_obj_cache: dict[str, discord.Webhook] = {}
         self._ending_broken_connections: set[int] = set()
+        self._recovery_task: asyncio.Task | None = None
         self._cleanup_loop.start()
 
     async def cog_load(self) -> None:
         if not self.db._conn:
             await self.db.init()
         self._session = aiohttp.ClientSession()
+        self._recovery_task = asyncio.create_task(self._recover_runtime_state())
 
     def cog_unload(self) -> None:
         self._cleanup_loop.cancel()
+        if self._recovery_task:
+            self._recovery_task.cancel()
         for task in self._timeouts.values():
             task.cancel()
         for task in self._queue_nudges.values():
@@ -405,8 +418,9 @@ class Phonebooth(commands.Cog):
 
     QUEUE_NOTIFY_NUDGE_SECONDS = 90
 
-    async def _run_timeout(self, channel_id: int) -> None:
-        await asyncio.sleep(config.QUEUE_TIMEOUT * 60)
+    async def _run_timeout(self, channel_id: int, delay_seconds: Optional[float] = None) -> None:
+        delay = config.QUEUE_TIMEOUT * 60 if delay_seconds is None else max(0.0, delay_seconds)
+        await asyncio.sleep(delay)
         entry = await self.db.get_queue_entry(channel_id)
         if entry:
             await self.db.remove_from_queue(channel_id)
@@ -422,8 +436,14 @@ class Phonebooth(commands.Cog):
                     pass
         self._timeouts.pop(channel_id, None)
 
-    async def _run_queue_nudge(self, channel_id: int, user_id: int) -> None:
-        await asyncio.sleep(self.QUEUE_NOTIFY_NUDGE_SECONDS)
+    async def _run_queue_nudge(
+        self,
+        channel_id: int,
+        user_id: int,
+        delay_seconds: Optional[float] = None,
+    ) -> None:
+        delay = self.QUEUE_NOTIFY_NUDGE_SECONDS if delay_seconds is None else max(0.0, delay_seconds)
+        await asyncio.sleep(delay)
         entry = await self.db.get_queue_entry(channel_id)
         if not entry or entry["user_id"] != user_id:
             self._queue_nudges.pop(channel_id, None)
@@ -447,18 +467,25 @@ class Phonebooth(commands.Cog):
                 pass
         self._queue_nudges.pop(channel_id, None)
 
-    def _start_timeout(self, channel_id: int) -> None:
+    def _start_timeout(self, channel_id: int, delay_seconds: Optional[float] = None) -> None:
         self._cancel_timeout(channel_id)
-        self._timeouts[channel_id] = asyncio.create_task(self._run_timeout(channel_id))
+        self._timeouts[channel_id] = asyncio.create_task(self._run_timeout(channel_id, delay_seconds))
 
     def _cancel_timeout(self, channel_id: int) -> None:
         task = self._timeouts.pop(channel_id, None)
         if task:
             task.cancel()
 
-    def _start_queue_nudge(self, channel_id: int, user_id: int) -> None:
+    def _start_queue_nudge(
+        self,
+        channel_id: int,
+        user_id: int,
+        delay_seconds: Optional[float] = None,
+    ) -> None:
         self._cancel_queue_nudge(channel_id)
-        self._queue_nudges[channel_id] = asyncio.create_task(self._run_queue_nudge(channel_id, user_id))
+        self._queue_nudges[channel_id] = asyncio.create_task(
+            self._run_queue_nudge(channel_id, user_id, delay_seconds)
+        )
 
     def _cancel_queue_nudge(self, channel_id: int) -> None:
         task = self._queue_nudges.pop(channel_id, None)
@@ -469,9 +496,16 @@ class Phonebooth(commands.Cog):
 
     INACTIVITY_MINUTES = 10
 
-    async def _inactivity_timer(self, conn_id: int, channel_a: int, channel_b: int) -> None:
+    async def _inactivity_timer(
+        self,
+        conn_id: int,
+        channel_a: int,
+        channel_b: int,
+        delay_seconds: Optional[float] = None,
+    ) -> None:
         """Auto-hangup a call after INACTIVITY_MINUTES of no messages."""
-        await asyncio.sleep(self.INACTIVITY_MINUTES * 60)
+        delay = self.INACTIVITY_MINUTES * 60 if delay_seconds is None else max(0.0, delay_seconds)
+        await asyncio.sleep(delay)
         # Check call still active
         conn = await self._get_connection_cached(channel_a)
         if not conn or conn["id"] != conn_id:
@@ -522,19 +556,74 @@ class Phonebooth(commands.Cog):
                 except discord.HTTPException:
                     pass
 
-    def _reset_inactivity(self, conn_id: int, channel_a: int, channel_b: int) -> None:
+    def _reset_inactivity(
+        self,
+        conn_id: int,
+        channel_a: int,
+        channel_b: int,
+        delay_seconds: Optional[float] = None,
+    ) -> None:
         """Reset the inactivity timer when a message is sent."""
         old = self._inactivity_tasks.pop(conn_id, None)
         if old:
             old.cancel()
         self._inactivity_tasks[conn_id] = asyncio.create_task(
-            self._inactivity_timer(conn_id, channel_a, channel_b)
+            self._inactivity_timer(conn_id, channel_a, channel_b, delay_seconds)
         )
 
     def _cancel_inactivity(self, conn_id: int) -> None:
         task = self._inactivity_tasks.pop(conn_id, None)
         if task:
             task.cancel()
+
+    async def _recover_runtime_state(self) -> None:
+        """Resume or expire persisted queues/calls after a bot restart."""
+        await self.bot.wait_until_ready()
+        try:
+            await self._recover_queue_entries()
+            await self._recover_active_connections()
+        except Exception as exc:
+            print(f"[recovery] phonebooth recovery failed: {exc}")
+
+    async def _recover_queue_entries(self) -> None:
+        timeout_seconds = config.QUEUE_TIMEOUT * 60
+        for entry in await self.db.get_all_queue_entries():
+            channel_id = int(entry["channel_id"])
+            elapsed = _elapsed_seconds(entry.get("joined_at"))
+            if elapsed >= timeout_seconds:
+                await self._run_timeout(channel_id, 0)
+                continue
+
+            self._start_timeout(channel_id, timeout_seconds - elapsed)
+            nudge_delay = self.QUEUE_NOTIFY_NUDGE_SECONDS - elapsed
+            self._start_queue_nudge(
+                channel_id,
+                int(entry["user_id"]),
+                max(1.0, nudge_delay),
+            )
+
+    async def _recover_active_connections(self) -> None:
+        timeout_seconds = self.INACTIVITY_MINUTES * 60
+        for conn in await self.db.get_active_connections():
+            conn_id = int(conn["id"])
+            last_activity = conn.get("last_activity_at") or conn.get("started_at")
+            elapsed = _elapsed_seconds(last_activity)
+            if elapsed >= timeout_seconds:
+                await self._inactivity_timer(
+                    conn_id,
+                    int(conn["channel_a"]),
+                    int(conn["channel_b"]),
+                    0,
+                )
+                continue
+
+            self._cache_connection(conn)
+            self._reset_inactivity(
+                conn_id,
+                int(conn["channel_a"]),
+                int(conn["channel_b"]),
+                timeout_seconds - elapsed,
+            )
 
     # ── Rate limiting (1:1 calls) ─────────────────────────────────────────────
     # Lax settings: 10 messages per 15-second rolling window.
