@@ -1811,7 +1811,7 @@ class Phonebooth(commands.Cog):
         display_name = _relay_display_name(member)
         container.add_item(
             discord.ui.Section(
-                f"**{display_name}**",
+                f"## {display_name}",
                 accessory=discord.ui.Thumbnail(_get_avatar_url(member), description=f"{display_name}'s avatar"),
             )
         )
