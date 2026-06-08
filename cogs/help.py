@@ -19,6 +19,7 @@ PUBLIC_COMMANDS = [
     ("Calling", "friendrequest", ["fr"], "f.fr", "Share your Discord username during a call.", "Everyone"),
     ("Calling", "notify", ["notifications"], "f.notify", "Toggle queue notification DMs.", "Everyone"),
     ("Calling", "profile", ["settings", "me"], "f.profile", "Show your notification setting and current server/channel state.", "Everyone"),
+    ("Calling", "banner", ["profilebanner"], "f.banner", "Reroll your profile banner.", "Everyone"),
     ("Calling", "report", [], "f.report", "Report your active or most recent call.", "Everyone"),
     ("Rooms", "room", ["r"], "f.room", "Join a group room with up to 6 servers.", "Everyone"),
     ("Rooms", "roomleave", ["rl"], "f.roomleave", "Leave your current group room.", "Everyone"),

@@ -20,6 +20,7 @@ import re
 import time
 from collections import deque
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import aiohttp
@@ -59,6 +60,7 @@ UNICODE_EMOJI_PATTERN = re.compile(
     r")"
 )
 MAX_EMOJIS_PER_MESSAGE = 10
+PROFILE_BANNER_DIR = Path(__file__).resolve().parents[1] / "assets" / "profile_banners"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -114,6 +116,20 @@ def _render_user_mentions(text: str, guild: discord.Guild | None) -> str:
         return "@user"
 
     return MENTION_PATTERN.sub(_replace, text)
+
+
+def _profile_banner_files() -> list[Path]:
+    if not PROFILE_BANNER_DIR.exists():
+        return []
+    return sorted(
+        path
+        for path in PROFILE_BANNER_DIR.iterdir()
+        if path.suffix.lower() in {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+    )
+
+
+def _fallback_banner_index(user_id: int, banner_count: int) -> int:
+    return int(user_id) % banner_count if banner_count else 0
 
 
 def _limit_unicode_emojis(text: str, limit: int = MAX_EMOJIS_PER_MESSAGE) -> tuple[str, bool]:
@@ -1708,34 +1724,22 @@ class Phonebooth(commands.Cog):
     @commands.command(name="profile", aliases=["settings", "me"])
     async def profile(self, ctx: commands.Context) -> None:
         """Show your Fliphone user settings and current server/channel state."""
-        notify_enabled, is_banned, queue_size, active_calls = await asyncio.gather(
+        notify_enabled, is_banned = await asyncio.gather(
             self.db.get_notify_status(ctx.author.id),
             self.db.is_user_banned(ctx.author.id),
-            self.db.get_queue_size(),
-            self.db.get_active_connection_count(),
         )
 
         embed = discord.Embed(
-            title=f"{_relay_display_name(ctx.author)} - Fliphone Profile",
-            description="Your current Fliphone settings and channel status.",
+            title="Fliphone Profile",
             color=config.COLOR_ERR if is_banned else config.COLOR_WAIT,
             timestamp=datetime.utcnow(),
         )
         embed.set_author(name=_relay_display_name(ctx.author), icon_url=_get_avatar_url(ctx.author))
-        embed.set_thumbnail(url=_get_avatar_url(ctx.author))
         embed.add_field(
-            name="Account",
+            name="Settings",
             value=(
-                f"Access: **{'Banned' if is_banned else 'OK'}**\n"
-                f"Notify DMs: **{'On' if notify_enabled else 'Off'}**"
-            ),
-            inline=True,
-        )
-        embed.add_field(
-            name="Network",
-            value=(
-                f"Waiting: **{queue_size}**\n"
-                f"Active calls: **{active_calls}**"
+                f"Notifications: **{'On' if notify_enabled else 'Off'}**\n"
+                f"Access: **{'Banned' if is_banned else 'OK'}**"
             ),
             inline=True,
         )
@@ -1750,39 +1754,100 @@ class Phonebooth(commands.Cog):
             if guild_cfg:
                 channel = self.bot.get_channel(guild_cfg["channel_id"])
                 current_mode = await self.db.get_gif_mode(ctx.guild.id)
+                setup_text = f"Healthy ({channel.mention})" if channel else "Channel missing"
                 embed.add_field(
-                    name="This Server",
+                    name="Server",
                     value=(
-                        f"Channel: {channel.mention if channel else '#missing-channel'}\n"
-                        f"Anonymous: {'On' if guild_cfg.get('anonymous') else 'Off'}\n"
-                        f"GIF mode: {current_mode}"
+                        f"Setup: **{setup_text}**\n"
+                        f"GIF mode: **{current_mode}**\n"
+                        f"Anonymous: **{'On' if guild_cfg.get('anonymous') else 'Off'}**"
                     ),
-                    inline=False,
+                    inline=True,
                 )
             else:
                 embed.add_field(
-                    name="This Server",
-                    value="Not set up yet. An admin can run `f.setup`.",
-                    inline=False,
+                    name="Server",
+                    value="Setup: **Not configured**\nGIF mode: **-**\nAnonymous: **-**",
+                    inline=True,
                 )
 
             if conn:
-                state = f"In a 1:1 call for {_duration_str(conn['started_at'])}."
+                state = f"In a 1:1 call for **{_duration_str(conn['started_at'])}**"
             elif room_member:
-                state = f"In room #{room_member['room_id']} as Station {room_member['station']}."
+                state = f"In room **#{room_member['room_id']}** as Station **{room_member['station']}**"
             elif q:
-                state = f"Waiting in queue for {_duration_str(q['joined_at'])}."
+                state = f"Waiting in queue for **{_duration_str(q['joined_at'])}**"
             else:
-                state = "Idle."
-            embed.add_field(name="This Channel", value=state, inline=False)
+                state = "Idle"
+            embed.add_field(name="Status", value=state, inline=False)
+        else:
+            embed.add_field(name="Status", value="Use `f.profile` in a server to show channel status.", inline=False)
 
-        embed.add_field(
-            name="Useful Commands",
-            value="`f.notify` - toggle DMs\n`f.status` - channel state\n`f.help` - command list",
-            inline=False,
+        banner_file = await self._attach_profile_banner(ctx.author.id, embed)
+        embed.set_footer(text=f"Use f.banner to reroll your banner • {config.FOOTER}")
+        if banner_file:
+            await ctx.send(embed=embed, file=banner_file)
+        else:
+            await ctx.send(embed=embed)
+
+    async def _attach_profile_banner(self, user_id: int, embed: discord.Embed) -> Optional[discord.File]:
+        banners = _profile_banner_files()
+        if not banners:
+            return None
+        saved_index = await self.db.get_profile_banner(user_id)
+        index = saved_index if saved_index is not None else _fallback_banner_index(user_id, len(banners))
+        if index < 0 or index >= len(banners):
+            index = _fallback_banner_index(user_id, len(banners))
+        banner = banners[index]
+        filename = f"profile_banner{banner.suffix.lower()}"
+        embed.set_image(url=f"attachment://{filename}")
+        return discord.File(banner, filename=filename)
+
+    @commands.command(name="banner", aliases=["profilebanner"])
+    async def banner(self, ctx: commands.Context, action: Optional[str] = None) -> None:
+        """Reroll or reset your Fliphone profile banner."""
+        banners = _profile_banner_files()
+        if not banners:
+            await ctx.send("❌ No profile banners are available yet.")
+            return
+
+        if action and action.lower() in {"reset", "default"}:
+            await self.db.reset_profile_banner(ctx.author.id)
+            embed = discord.Embed(
+                title="Profile Banner Reset",
+                description="Your profile banner is back to your stable default.",
+                color=config.COLOR_OK,
+            )
+            banner_file = await self._attach_profile_banner(ctx.author.id, embed)
+            embed.set_footer(text=config.FOOTER)
+            if banner_file:
+                await ctx.send(embed=embed, file=banner_file)
+            else:
+                await ctx.send(embed=embed)
+            return
+
+        if action:
+            await ctx.send("Use `f.banner` to reroll, or `f.banner reset` to return to your default.")
+            return
+
+        current = await self.db.get_profile_banner(ctx.author.id)
+        if current is None:
+            current = _fallback_banner_index(ctx.author.id, len(banners))
+        choices = [idx for idx in range(len(banners)) if idx != current]
+        new_index = random.choice(choices) if choices else current
+        await self.db.set_profile_banner(ctx.author.id, new_index)
+
+        embed = discord.Embed(
+            title="Profile Banner Updated",
+            description="Your new banner has been saved.",
+            color=config.COLOR_OK,
         )
-        embed.set_footer(text=config.FOOTER)
-        await ctx.send(embed=embed)
+        banner_file = await self._attach_profile_banner(ctx.author.id, embed)
+        embed.set_footer(text="Run f.profile to see your full profile.")
+        if banner_file:
+            await ctx.send(embed=embed, file=banner_file)
+        else:
+            await ctx.send(embed=embed)
 
     async def _fire_notify(self, caller_id: int) -> None:
         """DM all opted-in subscribers that someone is waiting in the queue."""

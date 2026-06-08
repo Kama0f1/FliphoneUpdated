@@ -34,6 +34,7 @@ TABLE_ORDER = [
     "blocked_guilds",
     "gif_reports",
     "notify_subscribers",
+    "profile_banners",
     "gif_url_list",
     "gif_mode_settings",
     "rooms",
@@ -133,6 +134,12 @@ CREATE TABLE IF NOT EXISTS notify_subscribers (
     user_id    INTEGER PRIMARY KEY,
     enabled    INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS profile_banners (
+    user_id      INTEGER PRIMARY KEY,
+    banner_index INTEGER NOT NULL,
+    updated_at   TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS scheduled_jobs (
@@ -273,6 +280,12 @@ CREATE TABLE IF NOT EXISTS notify_subscribers (
     user_id    BIGINT PRIMARY KEY,
     enabled    INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS profile_banners (
+    user_id      BIGINT PRIMARY KEY,
+    banner_index INTEGER NOT NULL,
+    updated_at   TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS scheduled_jobs (
@@ -1012,6 +1025,28 @@ class Database:
             (user_id,),
         )
         return bool(row["enabled"]) if row else False
+
+    async def get_profile_banner(self, user_id: int) -> Optional[int]:
+        row = await self._fetchrow(
+            "SELECT banner_index FROM profile_banners WHERE user_id = ?",
+            (user_id,),
+        )
+        return int(row["banner_index"]) if row else None
+
+    async def set_profile_banner(self, user_id: int, banner_index: int) -> None:
+        await self._execute(
+            """
+            INSERT INTO profile_banners (user_id, banner_index, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                banner_index = excluded.banner_index,
+                updated_at = excluded.updated_at
+            """,
+            (user_id, banner_index, datetime.utcnow().isoformat()),
+        )
+
+    async def reset_profile_banner(self, user_id: int) -> None:
+        await self._execute("DELETE FROM profile_banners WHERE user_id = ?", (user_id,))
 
     async def claim_scheduled_job(self, job_key: str, interval_seconds: float) -> bool:
         """
