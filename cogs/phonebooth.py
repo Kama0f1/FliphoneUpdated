@@ -1808,14 +1808,6 @@ class Phonebooth(commands.Cog):
             gallery.add_item(media=banner_file, description="Profile banner")
             container.add_item(gallery)
 
-        display_name = _relay_display_name(member)
-        container.add_item(
-            discord.ui.Section(
-                f"## {display_name}",
-                accessory=discord.ui.Thumbnail(_get_avatar_url(member), description=f"{display_name}'s avatar"),
-            )
-        )
-        container.add_item(discord.ui.Separator())
         level, _, _ = _level_from_xp(int(chat_stats["xp"]))
         rank_text = _rank_label(chat_stats.get("global_rank"))
         stat_lines = [
@@ -1827,11 +1819,16 @@ class Phonebooth(commands.Cog):
             stat_lines.append(f"Server Rank: **{_rank_label(chat_stats.get('server_rank'))}**")
         stat_lines.append(f"Chats Sent: **{int(chat_stats['message_count']):,}**")
         stat_lines.append(f"Notify: **{'On' if notify_enabled else 'Off'}**")
+
+        display_name = _relay_display_name(member)
+        container.add_item(discord.ui.TextDisplay(f"# {display_name}"))
+        container.add_item(discord.ui.Separator())
         container.add_item(
-            discord.ui.TextDisplay(
+            discord.ui.Section(
                 "\n".join(stat_lines)
                 + "\n"
-                "-# `f.banner` rerolls your banner"
+                "-# `f.banner` rerolls your banner",
+                accessory=discord.ui.Thumbnail(_get_avatar_url(member), description=f"{display_name}'s avatar"),
             )
         )
         view.add_item(container)
