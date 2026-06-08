@@ -1232,6 +1232,24 @@ class Database:
             (guild_id, limit),
         )
 
+    async def get_server_leaderboard(self, limit: int = 10) -> list[dict]:
+        limit = max(1, min(int(limit), 25))
+        return await self._fetchall(
+            """
+            SELECT
+                guild_id,
+                SUM(xp) AS xp,
+                SUM(message_count) AS message_count,
+                COUNT(*) AS active_users
+            FROM server_chat_stats
+            WHERE message_count > 0
+            GROUP BY guild_id
+            ORDER BY SUM(xp) DESC, SUM(message_count) DESC, guild_id ASC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+
     async def claim_scheduled_job(self, job_key: str, interval_seconds: float) -> bool:
         """
         Atomically claim a due recurring job.

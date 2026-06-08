@@ -146,13 +146,6 @@ def _level_from_xp(total_xp: int) -> tuple[int, int, int]:
     return level, remaining, needed
 
 
-def _xp_bar(current: int, needed: int, width: int = 10) -> str:
-    if needed <= 0:
-        return "▰" * width
-    filled = min(width, max(0, round((current / needed) * width)))
-    return "▰" * filled + "▱" * (width - filled)
-
-
 def _rank_label(rank: Optional[int]) -> str:
     return f"#{rank:,}" if rank else "Unranked"
 
@@ -1769,6 +1762,7 @@ class Phonebooth(commands.Cog):
             chat_stats,
             notify_enabled,
             is_banned,
+            show_server_rank=ctx.guild is not None,
         )
         if banner_file:
             await ctx.send(view=view, file=banner_file)
@@ -1799,6 +1793,7 @@ class Phonebooth(commands.Cog):
         chat_stats: dict,
         notify_enabled: bool,
         is_banned: bool,
+        show_server_rank: bool = False,
     ) -> tuple[discord.ui.LayoutView, Optional[discord.File]]:
         view = discord.ui.LayoutView(timeout=None)
         container = discord.ui.Container(
@@ -1821,23 +1816,28 @@ class Phonebooth(commands.Cog):
             )
         )
         container.add_item(discord.ui.Separator())
-        level, current_xp, needed_xp = _level_from_xp(int(chat_stats["xp"]))
+        level, _, _ = _level_from_xp(int(chat_stats["xp"]))
         rank_text = _rank_label(chat_stats.get("global_rank"))
-        server_rank = chat_stats.get("server_rank")
-        server_rank_text = f"\n**Server Rank:** {_rank_label(server_rank)}" if server_rank else ""
+        stat_lines = [
+            f"**Level {level}**",
+            f"XP Gained: **{int(chat_stats['xp']):,}**",
+            f"Global Rank: **{rank_text}**",
+        ]
+        if show_server_rank:
+            stat_lines.append(f"Server Rank: **{_rank_label(chat_stats.get('server_rank'))}**")
+        stat_lines.append(f"Chats Sent: **{int(chat_stats['message_count']):,}**")
+        stat_lines.append(f"Notify: **{'On' if notify_enabled else 'Off'}**")
         container.add_item(
             discord.ui.TextDisplay(
-                f"**Level {level}** • **Global Rank:** {rank_text}{server_rank_text}\n"
-                f"**XP:** {int(chat_stats['xp']):,} total • {current_xp:,}/{needed_xp:,} to next\n"
-                f"`{_xp_bar(current_xp, needed_xp)}`\n"
-                f"**Chats:** {int(chat_stats['message_count']):,} • **Notify:** {'On' if notify_enabled else 'Off'}\n"
+                "\n".join(stat_lines)
+                + "\n"
                 "-# `f.banner` rerolls your banner"
             )
         )
         view.add_item(container)
         return view, banner_file
 
-    def _leaderboard_embed(self, rows: list[dict], *, title: str) -> discord.Embed:
+    def _user_leaderboard_embed(self, rows: list[dict], *, title: str) -> discord.Embed:
         embed = discord.Embed(title=title, color=config.COLOR_WAIT)
         if not rows:
             embed.description = "No chat XP yet. Start talking in Fliphone calls to rank up."
@@ -1856,18 +1856,39 @@ class Phonebooth(commands.Cog):
         embed.set_footer(text="XP is earned from real relayed call messages.")
         return embed
 
+    def _server_leaderboard_embed(self, rows: list[dict]) -> discord.Embed:
+        embed = discord.Embed(title="Fliphone Server Leaderboard", color=config.COLOR_WAIT)
+        if not rows:
+            embed.description = "No server XP yet. Servers earn XP when members chat in Fliphone calls."
+            return embed
+
+        lines = []
+        for index, row in enumerate(rows, start=1):
+            xp = int(row["xp"] or 0)
+            level, _, _ = _level_from_xp(xp)
+            guild = self.bot.get_guild(int(row["guild_id"]))
+            name = guild.name if guild else f"Server {int(row['guild_id'])}"
+            lines.append(
+                f"**#{index}** {discord.utils.escape_markdown(name)} "
+                f"• Level **{level}** "
+                f"• **{xp:,} XP** "
+                f"• {int(row['message_count'] or 0):,} chats"
+            )
+        embed.description = "\n".join(lines)
+        embed.set_footer(text="Server XP comes from relayed Fliphone chat activity.")
+        return embed
+
     @commands.command(name="leaderboard", aliases=["lb", "levels", "rankings"])
     async def leaderboard(self, ctx: commands.Context) -> None:
         """Show the global Fliphone chat XP leaderboard."""
         rows = await self.db.get_chat_leaderboard(limit=10)
-        await ctx.send(embed=self._leaderboard_embed(rows, title="Fliphone Global Leaderboard"))
+        await ctx.send(embed=self._user_leaderboard_embed(rows, title="Fliphone User Leaderboard"))
 
     @commands.command(name="serverlb", aliases=["slb", "serverleaderboard"])
-    @commands.guild_only()
     async def serverlb(self, ctx: commands.Context) -> None:
-        """Show this server's Fliphone chat XP leaderboard."""
-        rows = await self.db.get_chat_leaderboard(limit=10, guild_id=ctx.guild.id)
-        await ctx.send(embed=self._leaderboard_embed(rows, title=f"{ctx.guild.name} Leaderboard"))
+        """Show the global Fliphone server XP leaderboard."""
+        rows = await self.db.get_server_leaderboard(limit=10)
+        await ctx.send(embed=self._server_leaderboard_embed(rows))
 
     @commands.command(name="banner", aliases=["profilebanner"])
     async def banner(self, ctx: commands.Context, action: Optional[str] = None) -> None:
