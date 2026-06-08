@@ -19,6 +19,7 @@ import asyncio
 import os
 import sys
 
+import discord
 from aiohttp import web
 
 import config
@@ -59,11 +60,24 @@ async def main() -> None:
     if os.environ.get("PORT"):
         asyncio.create_task(start_health_server())
 
-    try:
-        async with bot:
-            await bot.start(config.TOKEN)
-    except KeyboardInterrupt:
-        pass
+    login_retry_delay = 60
+    while True:
+        try:
+            async with bot:
+                await bot.start(config.TOKEN)
+            return
+        except KeyboardInterrupt:
+            return
+        except discord.HTTPException as exc:
+            if exc.status != 429:
+                raise
+            print(
+                "Discord login is rate limited. "
+                f"Waiting {login_retry_delay}s before retrying instead of crash-looping."
+            )
+            await asyncio.sleep(login_retry_delay)
+            login_retry_delay = min(login_retry_delay * 2, 1800)
+            bot = PhoneboothBot()
 
 
 if __name__ == "__main__":
