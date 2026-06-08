@@ -18,7 +18,6 @@ import asyncio
 import random
 import re
 import time
-from io import BytesIO
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -27,7 +26,6 @@ from typing import Optional
 import aiohttp
 import discord
 from discord.ext import commands, tasks
-from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 import config
 from database import Database
@@ -132,44 +130,6 @@ def _profile_banner_files() -> list[Path]:
 
 def _fallback_banner_index(user_id: int, banner_count: int) -> int:
     return int(user_id) % banner_count if banner_count else 0
-
-
-def _profile_font(size: int, *, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    candidates = [
-        Path("C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf"),
-        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
-        Path("/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf"),
-    ]
-    for path in candidates:
-        if path.exists():
-            return ImageFont.truetype(str(path), size)
-    return ImageFont.load_default()
-
-
-def _truncate_to_width(text: str, font: ImageFont.ImageFont, width: int) -> str:
-    if not text:
-        return ""
-    probe = Image.new("RGB", (1, 1))
-    draw = ImageDraw.Draw(probe)
-    if draw.textlength(text, font=font) <= width:
-        return text
-    suffix = "..."
-    usable = max(0, width - int(draw.textlength(suffix, font=font)))
-    result = ""
-    for char in text:
-        if draw.textlength(result + char, font=font) > usable:
-            break
-        result += char
-    return f"{result.rstrip()}{suffix}"
-
-
-def _rounded_image(image: Image.Image, radius: int) -> Image.Image:
-    mask = Image.new("L", image.size, 0)
-    draw = ImageDraw.Draw(mask)
-    draw.rounded_rectangle((0, 0, image.width, image.height), radius=radius, fill=255)
-    rounded = Image.new("RGBA", image.size)
-    rounded.paste(image.convert("RGBA"), (0, 0), mask)
-    return rounded
 
 
 def _limit_unicode_emojis(text: str, limit: int = MAX_EMOJIS_PER_MESSAGE) -> tuple[str, bool]:
@@ -1775,11 +1735,6 @@ class Phonebooth(commands.Cog):
         ]
         server_lines = ["Setup: Not configured", "GIF mode: -", "Anonymous: -"]
         status_text = "Use f.profile in a server to show channel status."
-        embed = discord.Embed(
-            color=config.COLOR_ERR if is_banned else config.COLOR_WAIT,
-            timestamp=datetime.utcnow(),
-        )
-
         if ctx.guild:
             guild_cfg, conn, q, room_member = await asyncio.gather(
                 self._get_guild_config_cached(ctx.guild.id),
@@ -1806,22 +1761,17 @@ class Phonebooth(commands.Cog):
             else:
                 status_text = "Idle"
 
-        banner = await self._profile_banner_path(ctx.author.id)
-        avatar_bytes = await self._fetch_profile_avatar(ctx.author)
-        card = await asyncio.to_thread(
-            self._render_profile_card,
+        view, banner_file = await self._profile_components(
             ctx.author,
-            banner,
-            avatar_bytes,
             settings_lines,
             server_lines,
             status_text,
             is_banned,
         )
-        profile_file = discord.File(BytesIO(card), filename="fliphone_profile.png")
-        embed.set_image(url="attachment://fliphone_profile.png")
-        embed.set_footer(text=f"Use f.banner to reroll your banner • {config.FOOTER}")
-        await ctx.send(embed=embed, file=profile_file)
+        if banner_file:
+            await ctx.send(view=view, file=banner_file)
+        else:
+            await ctx.send(view=view)
 
     async def _profile_banner_path(self, user_id: int) -> Optional[Path]:
         banners = _profile_banner_files()
@@ -1841,115 +1791,51 @@ class Phonebooth(commands.Cog):
         embed.set_image(url=f"attachment://{filename}")
         return discord.File(banner, filename=filename)
 
-    async def _fetch_profile_avatar(self, member: discord.Member | discord.User) -> Optional[bytes]:
-        if not self._session:
-            return None
-        try:
-            async with self._session.get(
-                _get_avatar_url(member),
-                timeout=aiohttp.ClientTimeout(total=3),
-            ) as resp:
-                if resp.status == 200:
-                    return await resp.read()
-        except (aiohttp.ClientError, asyncio.TimeoutError):
-            return None
-        return None
-
-    def _render_profile_card(
+    async def _profile_components(
         self,
         member: discord.Member | discord.User,
-        banner: Optional[Path],
-        avatar_bytes: Optional[bytes],
         settings_lines: list[str],
         server_lines: list[str],
         status_text: str,
         is_banned: bool,
-    ) -> bytes:
-        width, height = 760, 430
-        margin = 14
-        banner_h = 150
-        bg = (35, 36, 40)
-        panel = (43, 45, 49)
-        text = (242, 243, 245)
-        muted = (188, 191, 198)
-        accent = (237, 66, 69) if is_banned else (88, 101, 242)
+    ) -> tuple[discord.ui.LayoutView, Optional[discord.File]]:
+        view = discord.ui.LayoutView(timeout=None)
+        container = discord.ui.Container(
+            accent_colour=config.COLOR_ERR if is_banned else config.COLOR_WAIT
+        )
 
-        card = Image.new("RGB", (width, height), bg)
-        draw = ImageDraw.Draw(card)
-        draw.rounded_rectangle((0, 0, width - 1, height - 1), radius=12, fill=panel)
-        draw.rounded_rectangle((0, 0, 5, height - 1), radius=3, fill=accent)
+        banner_file = None
+        banner = await self._profile_banner_path(member.id)
+        if banner:
+            banner_file = discord.File(banner, filename=f"profile_banner{banner.suffix.lower()}")
+            gallery = discord.ui.MediaGallery()
+            gallery.add_item(media=banner_file, description="Profile banner")
+            container.add_item(gallery)
 
-        if banner and banner.exists():
-            with Image.open(banner) as im:
-                banner_img = ImageOps.fit(
-                    ImageOps.exif_transpose(im).convert("RGB"),
-                    (width - margin * 2, banner_h),
-                    method=Image.Resampling.LANCZOS,
-                    centering=(0.5, 0.5),
-                )
-        else:
-            banner_img = Image.new("RGB", (width - margin * 2, banner_h), (24, 25, 28))
-        rounded_banner = _rounded_image(banner_img, 8)
-        card.paste(rounded_banner, (margin, margin), rounded_banner)
-
-        name_font = _profile_font(24, bold=True)
-        title_font = _profile_font(20, bold=True)
-        heading_font = _profile_font(18, bold=True)
-        body_font = _profile_font(17)
-
-        avatar_size = 54
-        avatar_x = margin + 4
-        avatar_y = margin + banner_h + 22
-        if avatar_bytes:
-            try:
-                avatar = Image.open(BytesIO(avatar_bytes))
-                avatar = ImageOps.fit(
-                    ImageOps.exif_transpose(avatar).convert("RGB"),
-                    (avatar_size, avatar_size),
-                    method=Image.Resampling.LANCZOS,
-                )
-            except Exception:
-                avatar = None
-        else:
-            avatar = None
-        if avatar is None:
-            avatar = Image.new("RGB", (avatar_size, avatar_size), accent)
-            avatar_draw = ImageDraw.Draw(avatar)
-            initial = (_relay_display_name(member)[:1] or "?").upper()
-            bbox = avatar_draw.textbbox((0, 0), initial, font=title_font)
-            avatar_draw.text(
-                ((avatar_size - (bbox[2] - bbox[0])) / 2, (avatar_size - (bbox[3] - bbox[1])) / 2 - 2),
-                initial,
-                fill=text,
-                font=title_font,
+        display_name = _relay_display_name(member)
+        container.add_item(
+            discord.ui.Section(
+                f"**{display_name}**\nFliphone Profile",
+                accessory=discord.ui.Thumbnail(_get_avatar_url(member), description=f"{display_name}'s avatar"),
             )
-        mask = Image.new("L", (avatar_size, avatar_size), 0)
-        ImageDraw.Draw(mask).ellipse((0, 0, avatar_size - 1, avatar_size - 1), fill=255)
-        card.paste(avatar, (avatar_x, avatar_y), mask)
-
-        text_x = avatar_x + avatar_size + 14
-        draw.text((text_x, avatar_y + 2), _truncate_to_width(_relay_display_name(member), name_font, 520), fill=text, font=name_font)
-        draw.text((text_x, avatar_y + 32), "Fliphone Profile", fill=muted, font=title_font)
-
-        left_x = margin + 4
-        right_x = 380
-        fields_y = avatar_y + avatar_size + 28
-        draw.text((left_x, fields_y), "Settings", fill=text, font=heading_font)
-        draw.text((right_x, fields_y), "Server", fill=text, font=heading_font)
-
-        line_gap = 23
-        for i, line in enumerate(settings_lines[:3]):
-            draw.text((left_x, fields_y + 28 + i * line_gap), _truncate_to_width(line, body_font, 320), fill=text, font=body_font)
-        for i, line in enumerate(server_lines[:3]):
-            draw.text((right_x, fields_y + 28 + i * line_gap), _truncate_to_width(line, body_font, 330), fill=text, font=body_font)
-
-        status_y = fields_y + 92
-        draw.text((left_x, status_y), "Status", fill=text, font=heading_font)
-        draw.text((left_x, status_y + 28), _truncate_to_width(status_text, body_font, width - margin * 2 - 8), fill=text, font=body_font)
-
-        output = BytesIO()
-        card.save(output, "PNG", optimize=True)
-        return output.getvalue()
+        )
+        container.add_item(discord.ui.Separator())
+        container.add_item(
+            discord.ui.TextDisplay(
+                "**Settings**\n"
+                + "\n".join(settings_lines)
+                + "\n\n"
+                + "**Server**\n"
+                + "\n".join(server_lines)
+                + "\n\n"
+                + "**Status**\n"
+                + status_text
+                + "\n\n"
+                + f"Use `f.banner` to reroll your banner • {config.FOOTER}"
+            )
+        )
+        view.add_item(container)
+        return view, banner_file
 
     @commands.command(name="banner", aliases=["profilebanner"])
     async def banner(self, ctx: commands.Context, action: Optional[str] = None) -> None:
