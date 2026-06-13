@@ -1335,9 +1335,9 @@ class Phonebooth(commands.Cog):
         is_banned, cfg, conn, room_member, q = await asyncio.gather(
             self.db.is_user_banned(ctx.author.id),
             self._get_guild_config_cached(ctx.guild.id),
-            self.db.get_guild_connection(ctx.guild.id),
+            self._get_connection_cached(ctx.channel.id),
             self.db.get_room_member(ctx.channel.id),
-            self.db.get_guild_queue_entry(ctx.guild.id),
+            self.db.get_queue_entry(ctx.channel.id),
         )
 
         if is_banned:
@@ -1349,11 +1349,7 @@ class Phonebooth(commands.Cog):
             return
 
         if conn:
-            call_channel_id = conn["channel_a"] if conn["guild_a"] == ctx.guild.id else conn["channel_b"]
-            await ctx.send(
-                f"📞 Already in a call in <#{call_channel_id}> ({_duration_str(conn['started_at'])}). "
-                "Use `f.hangup` there to end it first."
-            )
+            await ctx.send(f"📞 Already in a call ({_duration_str(conn['started_at'])}). Use `f.hangup` to end it first.")
             return
 
         # Block joining a 1:1 call while the channel is in a group room
@@ -1362,10 +1358,7 @@ class Phonebooth(commands.Cog):
             return
 
         if q:
-            await ctx.send(
-                f"⏳ Already waiting in <#{q['channel_id']}> ({_duration_str(q['joined_at'])}). "
-                "Use `f.hangup` there to cancel."
-            )
+            await ctx.send(f"⏳ Already waiting ({_duration_str(q['joined_at'])}). Use `f.hangup` to cancel.")
             return
 
         wh_url, permission_issues = await self.ensure_relay_webhook(ctx.channel)

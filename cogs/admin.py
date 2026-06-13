@@ -187,8 +187,7 @@ class Admin(commands.Cog, name="Admin"):
         pb_cog = self.bot.get_cog("Phonebooth")
         room_cog = self.bot.get_cog("Room")
 
-        conn = await self.db.get_guild_connection(guild.id)
-        if conn:
+        for conn in await self.db.get_guild_connections(guild.id):
             active_channel_id = conn["channel_a"] if conn["guild_a"] == guild.id else conn["channel_b"]
             other_id = conn["channel_b"] if active_channel_id == conn["channel_a"] else conn["channel_a"]
             await self.db.remove_connection(conn["id"])
@@ -211,8 +210,7 @@ class Admin(commands.Cog, name="Admin"):
                     except discord.HTTPException:
                         pass
 
-        queue_entry = await self.db.get_guild_queue_entry(guild.id)
-        if queue_entry:
+        for queue_entry in await self.db.get_guild_queue_entries(guild.id):
             queue_channel_id = int(queue_entry["channel_id"])
             await self.db.remove_from_queue(queue_channel_id)
             if pb_cog:

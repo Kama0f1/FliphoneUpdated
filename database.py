@@ -672,8 +672,8 @@ class Database:
     async def get_queue_entry(self, channel_id: int) -> Optional[dict]:
         return await self._fetchrow("SELECT * FROM queue WHERE channel_id = ?", (channel_id,))
 
-    async def get_guild_queue_entry(self, guild_id: int) -> Optional[dict]:
-        return await self._fetchrow("SELECT * FROM queue WHERE guild_id = ?", (guild_id,))
+    async def get_guild_queue_entries(self, guild_id: int) -> list[dict]:
+        return await self._fetchall("SELECT * FROM queue WHERE guild_id = ?", (guild_id,))
 
     async def get_all_queue_entries(self) -> list[dict]:
         return await self._fetchall("SELECT * FROM queue ORDER BY joined_at ASC")
@@ -725,8 +725,8 @@ class Database:
             (channel_id, channel_id),
         )
 
-    async def get_guild_connection(self, guild_id: int) -> Optional[dict]:
-        return await self._fetchrow(
+    async def get_guild_connections(self, guild_id: int) -> list[dict]:
+        return await self._fetchall(
             "SELECT * FROM connections WHERE guild_a = ? OR guild_b = ?",
             (guild_id, guild_id),
         )
