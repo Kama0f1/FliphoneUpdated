@@ -860,7 +860,7 @@ class Phonebooth(commands.Cog):
             notice = (
                 "⚠️ **Call ended because webhook relay became unavailable.**\n"
                 "No messages were sent using the plain bot fallback. "
-                "A server admin should run `f.setup` in the configured channel."
+                "A server admin should run `f.setup` once in this server."
             )
             for channel_id in (conn["channel_a"], conn["channel_b"]):
                 channel = self.bot.get_channel(channel_id)
@@ -1035,7 +1035,7 @@ class Phonebooth(commands.Cog):
         # ── Ban check + config fetch in parallel ──────────────────────────────
         is_banned, cfg = await asyncio.gather(
             self.db.is_user_banned(message.author.id),
-            self._get_config_by_channel_cached(message.channel.id),
+            self._get_guild_config_cached(message.guild.id),
         )
         if is_banned:
             try:
@@ -1334,10 +1334,10 @@ class Phonebooth(commands.Cog):
         """Dial into the queue, or connect instantly."""
         is_banned, cfg, conn, room_member, q = await asyncio.gather(
             self.db.is_user_banned(ctx.author.id),
-            self._get_config_by_channel_cached(ctx.channel.id),
-            self._get_connection_cached(ctx.channel.id),
+            self._get_guild_config_cached(ctx.guild.id),
+            self.db.get_guild_connection(ctx.guild.id),
             self.db.get_room_member(ctx.channel.id),
-            self.db.get_queue_entry(ctx.channel.id),
+            self.db.get_guild_queue_entry(ctx.guild.id),
         )
 
         if is_banned:
@@ -1345,16 +1345,15 @@ class Phonebooth(commands.Cog):
             return
 
         if not cfg:
-            guild_cfg = await self._get_guild_config_cached(ctx.guild.id)
-            if guild_cfg:
-                pb_ch = self.bot.get_channel(guild_cfg["channel_id"])
-                await ctx.send(f"❌ Use the Fliphone channel: {pb_ch.mention if pb_ch else '#deleted-channel'}")
-            else:
-                await ctx.send("❌ Fliphone isn't set up. An admin should run `f.setup` in the target channel.")
+            await ctx.send("❌ Fliphone isn't set up. An admin should run `f.setup` once in this server.")
             return
 
         if conn:
-            await ctx.send(f"📞 Already in a call ({_duration_str(conn['started_at'])}). Use `f.hangup` to end it first.")
+            call_channel_id = conn["channel_a"] if conn["guild_a"] == ctx.guild.id else conn["channel_b"]
+            await ctx.send(
+                f"📞 Already in a call in <#{call_channel_id}> ({_duration_str(conn['started_at'])}). "
+                "Use `f.hangup` there to end it first."
+            )
             return
 
         # Block joining a 1:1 call while the channel is in a group room
@@ -1363,7 +1362,10 @@ class Phonebooth(commands.Cog):
             return
 
         if q:
-            await ctx.send(f"⏳ Already waiting ({_duration_str(q['joined_at'])}). Use `f.hangup` to cancel.")
+            await ctx.send(
+                f"⏳ Already waiting in <#{q['channel_id']}> ({_duration_str(q['joined_at'])}). "
+                "Use `f.hangup` there to cancel."
+            )
             return
 
         wh_url, permission_issues = await self.ensure_relay_webhook(ctx.channel)
@@ -1415,7 +1417,7 @@ class Phonebooth(commands.Cog):
             self._reset_inactivity(conn_id, ctx.channel.id, match["channel_id"])
             # Anon mode notifications
             caller_cfg  = cfg
-            partner_cfg = await self._get_config_by_channel_cached(match["channel_id"])
+            partner_cfg = await self._get_guild_config_cached(match["guild_id"])
             caller_anon  = caller_cfg.get("anonymous", 0) if caller_cfg else 0
             partner_anon = partner_cfg.get("anonymous", 0) if partner_cfg else 0
             if caller_anon:
@@ -1521,9 +1523,9 @@ class Phonebooth(commands.Cog):
     @commands.cooldown(1, 5, commands.BucketType.channel)
     async def skip(self, ctx: commands.Context) -> None:
         """End the current call and immediately search for a new one."""
-        cfg = await self._get_config_by_channel_cached(ctx.channel.id)
+        cfg = await self._get_guild_config_cached(ctx.guild.id)
         if not cfg:
-            await ctx.send("❌ This isn't a Fliphone channel.")
+            await ctx.send("❌ Fliphone isn't set up. An admin should run `f.setup` once in this server.")
             return
 
         conn = await self._get_connection_cached(ctx.channel.id)

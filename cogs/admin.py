@@ -187,15 +187,16 @@ class Admin(commands.Cog, name="Admin"):
         pb_cog = self.bot.get_cog("Phonebooth")
         room_cog = self.bot.get_cog("Room")
 
-        conn = await self.db.get_connection(channel_id)
+        conn = await self.db.get_guild_connection(guild.id)
         if conn:
-            other_id = conn["channel_b"] if channel_id == conn["channel_a"] else conn["channel_a"]
+            active_channel_id = conn["channel_a"] if conn["guild_a"] == guild.id else conn["channel_b"]
+            other_id = conn["channel_b"] if active_channel_id == conn["channel_a"] else conn["channel_a"]
             await self.db.remove_connection(conn["id"])
             if pb_cog:
                 pb_cog._invalidate_connection(conn)
                 pb_cog._cancel_inactivity(conn["id"])
-                pb_cog._cancel_timeout(channel_id)
-                pb_cog._cancel_queue_nudge(channel_id)
+                pb_cog._cancel_timeout(active_channel_id)
+                pb_cog._cancel_queue_nudge(active_channel_id)
                 pb_cog._call_reported_gifs.pop(conn["id"], None)
                 pb_cog._clear_rl_state(conn["channel_a"])
                 pb_cog._clear_rl_state(conn["channel_b"])
@@ -210,10 +211,13 @@ class Admin(commands.Cog, name="Admin"):
                     except discord.HTTPException:
                         pass
 
-        await self.db.remove_from_queue(channel_id)
-        if pb_cog:
-            pb_cog._cancel_timeout(channel_id)
-            pb_cog._cancel_queue_nudge(channel_id)
+        queue_entry = await self.db.get_guild_queue_entry(guild.id)
+        if queue_entry:
+            queue_channel_id = int(queue_entry["channel_id"])
+            await self.db.remove_from_queue(queue_channel_id)
+            if pb_cog:
+                pb_cog._cancel_timeout(queue_channel_id)
+                pb_cog._cancel_queue_nudge(queue_channel_id)
 
         room_member = await self.db.get_room_member(channel_id)
         if room_member:
@@ -363,7 +367,11 @@ class Admin(commands.Cog, name="Admin"):
                 inline=False,
             )
         else:
-            embed.add_field(name="Next Step", value="Setup looks healthy. Users can run `f.call` in the configured channel.", inline=False)
+            embed.add_field(
+                name="Next Step",
+                value="Setup looks healthy. Users can run `f.call` in any text channel with the required permissions.",
+                inline=False,
+            )
         embed.set_footer(text=config.FOOTER)
         return embed, repair_channel_id if issues else None
 
@@ -428,7 +436,11 @@ class Admin(commands.Cog, name="Admin"):
         embed.add_field(name="Channel", value=target.mention, inline=True)
         embed.add_field(name="Relay", value="Fresh webhook created", inline=True)
         embed.add_field(name="Avatar Test", value="Passed" if avatar_ok else "Using safe fallback", inline=True)
-        embed.add_field(name="Next Step", value=f"Users can run `f.call` in {target.mention}.", inline=False)
+        embed.add_field(
+            name="Next Step",
+            value="Users can run `f.call` in any text channel where Fliphone can view, send messages, and manage webhooks.",
+            inline=False,
+        )
         embed.set_footer(text=config.FOOTER)
         return embed
 
