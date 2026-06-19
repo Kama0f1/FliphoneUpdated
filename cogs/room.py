@@ -682,10 +682,15 @@ class Room(commands.Cog):
     async def ensure_relay_webhook(
         self,
         channel: discord.TextChannel,
+        *,
+        force_refresh: bool = False,
     ) -> tuple[Optional[str], list[str]]:
         phonebooth = self.bot.get_cog("Phonebooth")
         if phonebooth and hasattr(phonebooth, "ensure_relay_webhook"):
-            return await phonebooth.ensure_relay_webhook(channel)
+            return await phonebooth.ensure_relay_webhook(
+                channel,
+                force_refresh=force_refresh,
+            )
 
         bot_member = channel.guild.me
         if bot_member is None:
@@ -1093,7 +1098,7 @@ class Room(commands.Cog):
                     try:
                         await other_ch.send(
                             "⚠️ Room relay is paused for this server because its webhook is unavailable. "
-                            "An admin should run `f.setup` in this channel."
+                            "An admin should run `f.repair` in this channel."
                         )
                         self._broken_webhook_notified.add(other["channel_id"])
                     except discord.HTTPException:
@@ -1111,7 +1116,10 @@ class Room(commands.Cog):
                 silent=bool(recipient_gif_urls),
             )
             if not wh_msg and isinstance(other_ch, discord.TextChannel):
-                repaired_url, _ = await self.ensure_relay_webhook(other_ch)
+                repaired_url, _ = await self.ensure_relay_webhook(
+                    other_ch,
+                    force_refresh=True,
+                )
                 if repaired_url:
                     wh_url = repaired_url
                     other["webhook_url"] = repaired_url
@@ -1131,7 +1139,7 @@ class Room(commands.Cog):
                     try:
                         await other_ch.send(
                             "⚠️ Room relay stopped for this server because webhook repair failed. "
-                            "An admin should run `f.setup` in this channel."
+                            "An admin should run `f.repair` in this channel."
                         )
                         self._broken_webhook_notified.add(other["channel_id"])
                     except discord.HTTPException:

@@ -730,8 +730,25 @@ class Phonebooth(commands.Cog):
 
     # ── Webhook helpers ───────────────────────────────────────────────────────
 
-    async def get_or_create_webhook(self, channel: discord.TextChannel) -> Optional[str]:
-        cached = self._channel_webhook_urls.get(channel.id)
+    def _invalidate_webhook_url(self, url: Optional[str]) -> None:
+        if not url:
+            return
+        self._wh_obj_cache.pop(url, None)
+        stale_channels = [
+            channel_id
+            for channel_id, cached_url in self._channel_webhook_urls.items()
+            if cached_url == url
+        ]
+        for channel_id in stale_channels:
+            self._channel_webhook_urls.pop(channel_id, None)
+
+    async def get_or_create_webhook(
+        self,
+        channel: discord.TextChannel,
+        *,
+        force_refresh: bool = False,
+    ) -> Optional[str]:
+        cached = None if force_refresh else self._channel_webhook_urls.get(channel.id)
         if cached:
             return cached
         try:
@@ -769,13 +786,18 @@ class Phonebooth(commands.Cog):
     async def ensure_relay_webhook(
         self,
         channel: discord.TextChannel,
+        *,
+        force_refresh: bool = False,
     ) -> tuple[Optional[str], list[str]]:
         """Validate required permissions and refresh the channel's stored webhook URL."""
         issues = self.relay_permission_issues(channel)
         if issues:
             return None, issues
 
-        webhook_url = await self.get_or_create_webhook(channel)
+        webhook_url = await self.get_or_create_webhook(
+            channel,
+            force_refresh=force_refresh,
+        )
         if not webhook_url:
             return None, ["Webhook access failed"]
 
@@ -936,7 +958,7 @@ class Phonebooth(commands.Cog):
             notice = (
                 "⚠️ **Call ended because webhook relay became unavailable.**\n"
                 "No messages were sent using the plain bot fallback. "
-                "A server admin should run `f.setup` once in this server."
+                "Automatic repair failed. A server admin should run `f.repair` in this channel."
             )
             for channel_id in (conn["channel_a"], conn["channel_b"]):
                 channel = self.bot.get_channel(channel_id)
@@ -985,8 +1007,7 @@ class Phonebooth(commands.Cog):
             return msg if wait else True
         except Exception as exc:
             print(f"[relay-webhook] {exc}")
-            # Evict cached webhook on error so it gets rebuilt next send
-            self._wh_obj_cache.pop(url, None)
+            self._invalidate_webhook_url(url)
             return None if wait else False
 
     async def _repair_relay_webhook(
@@ -996,7 +1017,16 @@ class Phonebooth(commands.Cog):
     ) -> Optional[str]:
         if not isinstance(channel, discord.TextChannel):
             return None
-        webhook_url, _ = await self.ensure_relay_webhook(channel)
+        old_webhook_url = None
+        if channel.id == conn["channel_a"]:
+            old_webhook_url = conn.get("webhook_a")
+        elif channel.id == conn["channel_b"]:
+            old_webhook_url = conn.get("webhook_b")
+        self._invalidate_webhook_url(old_webhook_url)
+        webhook_url, _ = await self.ensure_relay_webhook(
+            channel,
+            force_refresh=True,
+        )
         if not webhook_url:
             return None
 
