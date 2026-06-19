@@ -36,7 +36,7 @@ Messages are relayed in real time. A short in-memory rolling excerpt is kept tem
 
 ### 1. Invite the bot
 
-[**➕ Add Fliphone to your server**](https://discord.com/api/oauth2/authorize?client_id=1489342959974486158&permissions=536955904&scope=bot+applications.commands)
+[**➕ Add Fliphone to your server**](https://discord.com/api/oauth2/authorize?client_id=1489342959974486158&permissions=536988736&scope=bot+applications.commands)
 
 **Required permissions:**
 | Permission | Used for |
@@ -45,7 +45,9 @@ Messages are relayed in real time. A short in-memory rolling excerpt is kept tem
 | Send Messages | Sending relay messages and status embeds |
 | Manage Webhooks | Required for all cross-server message relay |
 | Embed Links | All status and help embeds |
+| Attach Files | Relaying allowed media and profile assets |
 | Read Message History | Webhook lookup and reply context |
+| Add Reactions | Relaying standard emoji reactions |
 
 ### 2. Set up your channel
 

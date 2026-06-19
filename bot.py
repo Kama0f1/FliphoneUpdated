@@ -216,10 +216,16 @@ class PhoneboothBot(commands.AutoShardedBot):
         bot_member = guild.me
         if bot_member:
             perms = bot_member.guild_permissions
-            if not perms.send_messages:   missing.append("Send Messages")
-            if not perms.manage_webhooks: missing.append("Manage Webhooks")
-            if not perms.embed_links:     missing.append("Embed Links")
-            if not perms.read_message_history: missing.append("Read Message History")
+            required_permissions = (
+                ("View Channel", perms.view_channel),
+                ("Send Messages", perms.send_messages),
+                ("Manage Webhooks", perms.manage_webhooks),
+                ("Embed Links", perms.embed_links),
+                ("Attach Files", perms.attach_files),
+                ("Read Message History", perms.read_message_history),
+                ("Add Reactions", perms.add_reactions),
+            )
+            missing = [name for name, allowed in required_permissions if not allowed]
 
         # ── Try to send welcome in first available text channel ───────────────
         target = None

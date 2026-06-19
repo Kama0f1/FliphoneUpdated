@@ -97,9 +97,9 @@ TOPGG_TOKEN: str = os.getenv("TOPGG_TOKEN", "")
 NOTIFY_IGNORE_IDS: set[int] = set()
 
 # ── Invite ────────────────────────────────────────────────────────────────────
-# Permissions: View Channel + Send Messages + Manage Webhooks +
-#              Embed Links + Read Message History
-BOT_PERMISSIONS: int = 536955904
+# Permissions: View Channel + Send Messages + Manage Webhooks + Embed Links +
+#              Attach Files + Read Message History + Add Reactions
+BOT_PERMISSIONS: int = 536988736
 
 # Optional: number of gateway shards to use. Set to 0 or leave unset to let
 # Discord/discord.py auto-determine the shard count.

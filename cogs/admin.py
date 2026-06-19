@@ -634,10 +634,13 @@ class Admin(commands.Cog, name="Admin"):
         embed.add_field(
             name="Required Permissions",
             value=(
+                "• View Channel\n"
                 "• Send Messages\n"
                 "• Manage Webhooks *(required for relay)*\n"
                 "• Embed Links\n"
-                "• Read Message History"
+                "• Attach Files\n"
+                "• Read Message History\n"
+                "• Add Reactions"
             ),
             inline=False,
         )
