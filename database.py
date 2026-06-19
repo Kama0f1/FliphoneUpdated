@@ -1357,7 +1357,7 @@ class Database:
                   SELECT 1 FROM room_members rm
                   WHERE rm.room_id = r.id AND rm.guild_id = ?
               )
-              AND (? IS NULL OR r.id <> ?)
+              AND (CAST(? AS BIGINT) IS NULL OR r.id <> ?)
               AND NOT EXISTS (
                   SELECT 1
                   FROM room_members candidate
