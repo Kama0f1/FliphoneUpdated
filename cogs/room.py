@@ -11,16 +11,17 @@ f.roomkick / f.rk      – Start a majority vote to kick a station
 
 How rooms work
 --------------
-Each server in a room is assigned a NATO station name (Alpha–Foxtrot).
+Each server in a room is assigned a station name (Alpha–Echo).
 Server names are never revealed — only station names appear in join/leave
 notices and as webhook prefixes. Rooms become active once 2+ servers have
 joined, and new servers can slot in to existing active rooms up to the
-max of 6.
+max of 5.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 import re
 import time
@@ -43,6 +44,8 @@ from relay_policy import (
     is_provider_gif,
 )
 # GifReportView lives in phonebooth; import lazily via bot.get_cog to avoid circular imports.
+
+logger = logging.getLogger("fliphone.room")
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -308,6 +311,7 @@ class Room(commands.Cog):
             int, tuple[dict, dict, list[dict]]
         ] = {}
         self._relay_context_miss_until: dict[int, float] = {}
+        self._join_locks: dict[int, asyncio.Lock] = {}
         self._recovery_task: asyncio.Task | None = None
 
     async def cog_load(self) -> None:
@@ -1239,45 +1243,53 @@ class Room(commands.Cog):
         *,
         excluded_room_id: Optional[int] = None,
         force_new: bool = False,
+        progress: discord.Message,
     ) -> None:
         """Core join logic — find or create a room for this channel."""
+        async def finish(content: str = "", *, embed: discord.Embed | None = None) -> None:
+            await progress.edit(content=content or None, embed=embed)
+
         if await self.db.is_user_banned(ctx.author.id):
-            await ctx.send("🚫 You are banned from using Fliphone.")
+            await finish("🚫 You are banned from using Fliphone.")
             return
 
         cfg = await self.db.get_guild_config(ctx.guild.id)
         if not cfg:
-            await ctx.send(
-                "❌ Fliphone isn't set up in this server. An admin should run `f.setup` first."
-            )
+            await finish("❌ Fliphone isn't set up in this server. An admin should run `f.setup` first.")
             return
 
         if await self.db.get_connection(ctx.channel.id):
-            await ctx.send(
-                "📞 This channel is in an active 1:1 call. Use `f.hangup` first."
-            )
+            await finish("📞 This channel is in an active 1:1 call. Use `f.hangup` first.")
             return
 
         if await self.db.get_room_member(ctx.channel.id):
-            await ctx.send("📡 Already in a room! Use `f.roomleave` to leave first.")
+            await finish("📡 Already in a room! Use `f.roomleave` to leave first.")
             return
 
         # Kick-cooldown check
         expiry = self._kick_cooldowns.get(ctx.guild.id, 0)
         if time.monotonic() < expiry:
             secs = int(expiry - time.monotonic())
-            await ctx.send(
+            await finish(
                 f"⏳ Your server is on a room cooldown for another "
                 f"**{secs // 60}m {secs % 60}s**."
             )
             return
 
         if not isinstance(ctx.channel, discord.TextChannel):
-            await ctx.send("❌ Group rooms require a normal text channel.")
+            await finish("❌ Group rooms require a normal text channel.")
             return
-        wh_url, permission_issues = await self.ensure_relay_webhook(ctx.channel)
+        try:
+            async with asyncio.timeout(15):
+                wh_url, permission_issues = await self.ensure_relay_webhook(ctx.channel)
+        except TimeoutError:
+            await finish(
+                "❌ Room setup timed out while checking this channel's webhook. "
+                "Ask an admin to run `f.repair` here, then try again."
+            )
+            return
         if not wh_url:
-            await ctx.send(
+            await finish(
                 "❌ Fliphone cannot join a room because webhook relay is unavailable.\n"
                 f"Missing or broken: **{', '.join(permission_issues)}**\n"
                 "A server admin should run `f.setup` in this channel."
@@ -1309,48 +1321,49 @@ class Room(commands.Cog):
             await self.db.touch_room(room["id"])
             self._reset_inactivity(ctx.channel.id, room["id"])
 
-            # Notify every member
+            # Confirm the join first, then notify the other members.
             all_members = await self.db.get_room_members(room["id"])
             if count >= 2:
                 active_room = {**room, "status": "active"}
                 self._cache_relay_context(active_room, all_members)
+            others = [
+                f"**Station {member['station']}**"
+                for member in all_members
+                if member["channel_id"] != ctx.channel.id
+            ]
+            others_str = ", ".join(others) if others else "nobody yet"
+            await finish(
+                embed=discord.Embed(
+                    title=f"📡 You joined as Station {station}!",
+                    description=(
+                        f"There are **{count}** server(s) here right now: {others_str}.\n\n"
+                        "Say hello! 👋\n"
+                        "**Tips:**\n"
+                        "• `f.roomstatus` — see who's in the room\n"
+                        "• `f.roomkick <station>` — start a vote to remove a station\n"
+                        "• `f.roomleave` — leave quietly  ·  `f.roomskip` — skip to a new room\n\n"
+                        "*By continuing you agree to be respectful.*"
+                    ),
+                    color=config.COLOR_OK,
+                )
+            )
+            notices = []
             for m in all_members:
+                if m["channel_id"] == ctx.channel.id:
+                    continue
                 ch = self.bot.get_channel(m["channel_id"])
                 if not ch:
                     continue
-                try:
-                    if m["channel_id"] == ctx.channel.id:
-                        # Greet the new arrival
-                        others = [
-                            f"**Station {x['station']}**"
-                            for x in all_members
-                            if x["channel_id"] != ctx.channel.id
-                        ]
-                        others_str = ", ".join(others) if others else "nobody yet"
-                        await ch.send(
-                            embed=discord.Embed(
-                                title=f"📡 You joined as Station {station}!",
-                                description=(
-                                    f"There are **{count}** server(s) here right now: {others_str}.\n\n"
-                                    "Say hello! 👋\n"
-                                    "**Tips:**\n"
-                                    "• `f.roomstatus` — see who's in the room\n"
-                                    "• `f.roomkick <station>` — start a vote to remove a station\n"
-                                    "• `f.roomleave` — leave quietly  ·  `f.roomskip` — skip to a new room\n\n"
-                                    "*By continuing you agree to be respectful.*"
-                                ),
-                                color=config.COLOR_OK,
-                            )
+                notices.append(
+                    ch.send(
+                        embed=discord.Embed(
+                            description=f"📡 **Station {station}** has joined the room! ({count}/{ROOM_MAX_SIZE})",
+                            color=config.COLOR_OK,
                         )
-                    else:
-                        await ch.send(
-                            embed=discord.Embed(
-                                description=f"📡 **Station {station}** has joined the room! ({count}/{ROOM_MAX_SIZE})",
-                                color=config.COLOR_OK,
-                            )
-                        )
-                except discord.HTTPException:
-                    pass
+                    )
+                )
+            if notices:
+                await asyncio.gather(*notices, return_exceptions=True)
             return
 
         # ── No suitable room found — create a new one ─────────────────────────
@@ -1366,7 +1379,7 @@ class Room(commands.Cog):
         self._reset_inactivity(ctx.channel.id, room_id)
         self._start_waiting_timeout(room_id)
 
-        await ctx.send(
+        await finish(
             embed=discord.Embed(
                 title="📡 Room Created — Waiting for others…",
                 description=(
@@ -1381,19 +1394,54 @@ class Room(commands.Cog):
 
     # ── f.room ────────────────────────────────────────────────────────────────
 
+    async def _guarded_join(self, ctx: commands.Context, **kwargs) -> None:
+        lock = self._join_locks.setdefault(ctx.channel.id, asyncio.Lock())
+        if lock.locked():
+            await ctx.send("📡 A room search is already running in this channel.")
+            return
+        async with lock:
+            progress = await ctx.send("📡 **Looking for a room...**")
+            try:
+                async with asyncio.timeout(30):
+                    await self._do_join(ctx, progress=progress, **kwargs)
+            except TimeoutError:
+                logger.warning(
+                    "Room join timed out for guild=%s channel=%s",
+                    ctx.guild.id,
+                    ctx.channel.id,
+                )
+                await progress.edit(
+                    content=(
+                        "❌ The room search timed out. Please try `f.room` again. "
+                        "If it repeats, ask an admin to run `f.check`."
+                    ),
+                    embed=None,
+                )
+            except Exception:
+                logger.exception(
+                    "Room join failed for guild=%s channel=%s",
+                    ctx.guild.id,
+                    ctx.channel.id,
+                )
+                await progress.edit(
+                    content=(
+                        "❌ Something interrupted the room search. Please try `f.room` again. "
+                        "If it repeats, ask an admin to run `f.check`."
+                    ),
+                    embed=None,
+                )
+
     @commands.command(name="room", aliases=["r"])
     @commands.guild_only()
-    @commands.cooldown(1, 5, commands.BucketType.channel)
     async def room(self, ctx: commands.Context) -> None:
         """Join a group room of up to 5 servers."""
-        await self._do_join(ctx)
+        await self._guarded_join(ctx)
 
     @commands.command(name="roomcreate", aliases=["rc"])
     @commands.guild_only()
-    @commands.cooldown(1, 30, commands.BucketType.channel)
     async def roomcreate(self, ctx: commands.Context) -> None:
         """Create a fresh room instead of joining an available one."""
-        await self._do_join(ctx, force_new=True)
+        await self._guarded_join(ctx, force_new=True)
 
     # ── f.roomleave ───────────────────────────────────────────────────────────
 
@@ -1419,7 +1467,6 @@ class Room(commands.Cog):
 
     @commands.command(name="roomskip", aliases=["rs"])
     @commands.guild_only()
-    @commands.cooldown(1, 5, commands.BucketType.channel)
     async def roomskip(self, ctx: commands.Context) -> None:
         """Leave the current room and immediately search for a new one."""
         rm = await self.db.get_room_member(ctx.channel.id)
@@ -1434,7 +1481,7 @@ class Room(commands.Cog):
         )
         await ctx.send("⏭️ Skipping to a new room…")
         # Directly invoke the join logic (no cooldown hit since we call internal method)
-        await self._do_join(ctx, excluded_room_id=rm["room_id"])
+        await self._guarded_join(ctx, excluded_room_id=rm["room_id"])
 
     # ── f.roomstatus ─────────────────────────────────────────────────────────
 

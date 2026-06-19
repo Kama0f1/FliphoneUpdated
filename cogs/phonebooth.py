@@ -1515,7 +1515,6 @@ class Phonebooth(commands.Cog):
             await search_msg.edit(
                 content=(
                 f"📳 **Searching for someone to talk to...** ({queue_size} waiting, {active} active calls)\n"
-                f"Estimated wait: **instant if someone dials, otherwise up to {config.QUEUE_TIMEOUT} min**.\n"
                 f"Use `f.hangup` to cancel. Auto-cancels in {config.QUEUE_TIMEOUT} min."
                 )
             )
@@ -1683,7 +1682,6 @@ class Phonebooth(commands.Cog):
             queue_size = await self.db.get_queue_size()
             await ctx.send(
                 f"📳 **Searching for someone to talk to...** ({queue_size} waiting)\n"
-                f"Estimated wait: **instant if someone dials, otherwise up to {config.QUEUE_TIMEOUT} min**.\n"
                 f"Use `f.skip` again to re-roll. Auto-cancels in {config.QUEUE_TIMEOUT} min."
             )
 
