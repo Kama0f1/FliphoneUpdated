@@ -37,6 +37,18 @@ LOG_CHANNEL_ID: int = int(os.getenv("LOG_CHANNEL_ID", "1511060418083291268"))
 # Channel ID where GIF reports are sent for owner review.
 # Leave blank / 0 to disable (reports still get stored in the DB).
 REPORT_LOG_CHANNEL_ID: int = int(os.getenv("REPORT_LOG_CHANNEL_ID", "0"))
+GIF_REVIEW_CHANNEL_ID: int = int(os.getenv("GIF_REVIEW_CHANNEL_ID", "1517186263000682737"))
+
+SUPPORT_URL: str = os.getenv("SUPPORT_URL", "https://discord.gg/t3KHGqPuEP")
+TOPGG_URL: str = os.getenv("TOPGG_URL", "https://top.gg/bot/1489342959974486158")
+PRIVACY_URL: str = os.getenv(
+    "PRIVACY_URL",
+    "https://gist.github.com/Kama0f1/431f01bbbf1ae6243505778376ba0fb3",
+)
+TOS_URL: str = os.getenv(
+    "TOS_URL",
+    "https://gist.github.com/Kama0f1/085bf38fb03e3c84d99f2ff9afc410af",
+)
 
 # ── Display ───────────────────────────────────────────────────────────────────
 ANON_NAMES: list[str] = [

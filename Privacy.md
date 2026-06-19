@@ -1,57 +1,48 @@
-\# Privacy Policy for Fliphone
+# Privacy Policy for Fliphone
 
-\*\*Last Updated: June 5, 2026\*\*
+**Last updated: June 19, 2026**
 
+Fliphone is a Discord bot that connects users across servers for 1:1 calls and group rooms. This policy explains what data the bot handles and why.
 
+## Data We Handle
 
-\### 1. Introduction
+| Data | Purpose | Retention |
+|---|---|---|
+| Server, channel, and user IDs | Setup, routing, moderation, preferences, XP, and rankings | Until no longer needed or deletion is requested |
+| Relay webhook URLs | Deliver messages with the sender's chosen relay identity | Until setup is removed or repaired |
+| Call and room metadata | Queue state, start/end times, message counts, statistics, and reliability | Stored in the bot database |
+| User preferences | Notification choice, personal mask setting, and profile banner | Stored until changed or deleted |
+| Moderation data | Bot-wide bans, server blocks, reports, and resolution status | Stored for safety and abuse prevention |
+| GIF URLs | Safety checks, reports, whitelist submissions, and blacklists | Stored when submitted or reported |
+| Recent message excerpts | Allow users to report short or active conversations | See the section below |
 
-Fliphone is a cross-server communication tool. We are committed to transparency regarding the data we collect and how it is used. By using Fliphone, you agree to the practices described in this policy.
+## Message Content and Reports
 
+Fliphone relays message content in real time. It does not write ordinary conversation text to PostgreSQL or weekly database backups.
 
+For safety reports, the bot keeps a rolling in-memory buffer of up to the last 50 relayed messages per conversation. Each entry is limited to 500 characters. The buffer is removed 30 minutes after a call ends, when the process restarts, or when it is otherwise cleared.
 
-\### 2. Data Collection (What is Logged)
+If a user submits a report, up to the last 20 relevant messages may be posted to a private Discord moderation channel for review. That Discord message may remain until moderators delete it. Report metadata and the report reason are stored in the database.
 
-To provide the core calling functionality and ensure community safety, Fliphone stores minimal metadata in a private database:
+Messages beginning with `x ` or `X ` stay in the local Discord channel and are not relayed or added to the report buffer.
 
-\*   \*\*Discord Identifiers:\*\* Server IDs, Channel IDs, and User IDs (specifically for administrators who configure the bot and users on the global ban list).
+## Data We Do Not Request
 
-\*   \*\*Relay Data:\*\* Webhook URLs created during the setup process to facilitate message relay.
+Fliphone does not request passwords, email addresses, payment information, or real-world identity information. Users should not send sensitive personal information through calls or rooms.
 
-\*   \*\*Call Metadata:\*\* Start/end times, call duration, and the total number of messages sent per session (used for global statistics).
+## Storage and Security
 
-\*   \*\*Safety Reports:\*\* When a user reports a GIF, the specific \*\*GIF URL\*\* is logged for manual review, blacklisting, or whitelisting by the developer.
+Production data is stored in managed PostgreSQL. Verified SQLite backup snapshots are created weekly, encrypted with AES-GCM, and rotated so only the four newest backups are kept. The encryption key is stored separately from the backups.
 
+Database and moderation access is restricted to the bot owner and trusted moderators where required. Fliphone does not sell personal data.
 
+## User Choices
 
-\### 3. Data We DO NOT Collect
+- Server administrators can remove their server setup with `f.teardown`.
+- Users can toggle queue notification DMs with `f.notify`.
+- Users can keep a message local by beginning it with `x `.
+- Users can request deletion of associated stored data through the support server, subject to safety and legal retention needs.
 
-\*   \*\*Message Content:\*\* Fliphone acts as a real-time relay. \*\*We do not log, store, or archive the text content of your conversations.\*\* Once a message is delivered to the partner server, it is not retained on our infrastructure.
+## Contact
 
-\*   \*\*Personal Information:\*\* We do not collect emails, passwords, or real-world identity data.
-
-
-
-\### 4. Data Storage and Security
-
-\*   \*\*Infrastructure:\*\* All data is stored in a private database, either SQLite for local fallback or managed PostgreSQL for production hosting.
-
-\*   \*\*Access:\*\* Access to the database is strictly restricted to the lead bot developer for technical maintenance and safety enforcement.
-
-\*   \*\*Third Parties:\*\* We do not share, sell, or trade any logged data with third parties.
-
-
-
-\### 5. User Control (Opt-In/Opt-Out)
-
-\*   \*\*Opt-In:\*\* The bot is inactive until an administrator runs the `f.setup` command.
-
-\*   \*\*Opt-Out:\*\* Administrators can run `f.teardown` at any time to immediately stop all relays and \*\*permanently delete\*\* the server's configuration and webhook data from our database.
-
-\*   \*\*Manual Requests:\*\* Users may contact the developer via the support server to request the removal of any specific metadata associated with their User ID.
-
-
-
-\### 6. Contact
-
-If you have questions regarding this policy, please join our official support server.
+Questions and deletion requests can be submitted through the official Fliphone support server linked in `f.help`.

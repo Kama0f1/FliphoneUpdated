@@ -117,6 +117,7 @@ class PhoneboothBot(commands.AutoShardedBot):
     async def setup_hook(self) -> None:
         self.http_session = aiohttp.ClientSession()
         await self.db.init()
+        await self.load_extension("cogs.gif_submission")
         await self.load_extension("cogs.phonebooth")
         await self.load_extension("cogs.misc")
         await self.load_extension("cogs.admin")

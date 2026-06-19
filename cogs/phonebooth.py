@@ -19,7 +19,7 @@ import random
 import re
 import time
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -30,6 +30,13 @@ from discord.ext import commands, tasks
 import config
 from database import Database
 from filter import filter_message
+from relay_policy import (
+    contains_custom_emoji,
+    extract_urls,
+    is_direct_gif_url,
+    is_local_only,
+    is_provider_gif,
+)
 
 # This catches Tenor, Giphy, Klipy, and ANY link that ends in .gif
 # Everything else is treated as a potentially unsafe link and stripped before relay.
@@ -94,7 +101,7 @@ def _get_avatar_url(member: discord.Member | discord.User) -> str:
     # webhook in another server. Global profile avatars are cross-server assets.
     asset = member.avatar or member.default_avatar
     try:
-        return str(asset.with_static_format("png").with_size(256).url)
+        return str(asset.with_size(256).url)
     except Exception:
         try:
             return str(asset.url)
@@ -177,8 +184,7 @@ def _limit_unicode_emojis(text: str, limit: int = MAX_EMOJIS_PER_MESSAGE) -> tup
 
 class GifReportView(discord.ui.View):
     """
-    Persistent button under every relayed GIF.
-    report_id is stored in the embed footer so it survives bot restarts.
+    Persistent compact button under every reportable relayed GIF.
     """
 
     def __init__(self) -> None:
@@ -193,40 +199,26 @@ class GifReportView(discord.ui.View):
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
         db: Database = interaction.client.db
+        await interaction.response.defer()
 
-        # ── Parse report_id from footer ───────────────────────────────────────
-        report_id = None
-        if interaction.message and interaction.message.embeds:
-            footer = interaction.message.embeds[0].footer
-            if footer and footer.text:
-                # Footer format: "Report #42 • Fliphone"
-                try:
-                    report_id = int(footer.text.split("Report #")[1].split("•")[0].strip())
-                except (IndexError, ValueError):
-                    pass
-
-        if not report_id:
-            await interaction.response.send_message(
-                "❌ Couldn't read report ID. This button may be too old.", ephemeral=True
-            )
-            return
-
-        # ── Fetch report from DB ──────────────────────────────────────────────
-        report = await db.get_gif_report(report_id)
+        report = None
+        if interaction.message:
+            report = await db.get_gif_report_by_prompt(interaction.message.id)
         if not report:
-            await interaction.response.send_message(
-                "❌ Report not found in database.", ephemeral=True
+            await interaction.followup.send(
+                "This report button is no longer active.", ephemeral=True
             )
             return
+        report_id = report["id"]
 
         # ── Already reported / reviewed? ──────────────────────────────────────
         if report["status"] == "reported":
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "⚠️ This GIF has already been reported and is pending review.", ephemeral=True
             )
             return
         if report["status"] in ("blacklisted", "whitelisted"):
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "✅ This GIF has already been reviewed by the bot owner.", ephemeral=True
             )
             return
@@ -234,7 +226,7 @@ class GifReportView(discord.ui.View):
         # ── Whitelisted? ──────────────────────────────────────────────────────
         url_status = await db.check_gif_url(report["url"])
         if url_status == "whitelist":
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "✅ This GIF has been verified as safe and cannot be reported.", ephemeral=True
             )
             return
@@ -263,19 +255,8 @@ class GifReportView(discord.ui.View):
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 pass
 
-        # ── Update the report card button ─────────────────────────────────────
-        button.disabled = True
-        button.label = "✅ Reported"
-        new_embed = discord.Embed(
-            title="✅ GIF Reported — Removed",
-            description=(
-                "This GIF has been removed and flagged for review.\n"
-                "The bot owner will blacklist or whitelist it."
-            ),
-            color=0x57F287,
-        )
-        new_embed.set_footer(text=f"Report #{report_id} • {config.FOOTER}")
-        await interaction.response.edit_message(embed=new_embed, view=self)
+        if interaction.message:
+            await interaction.message.edit(content="GIF reported and removed.", view=None)
 
         # ── Log to report channel ─────────────────────────────────────────────
         report_ch_id = int(config.REPORT_LOG_CHANNEL_ID) if config.REPORT_LOG_CHANNEL_ID else 0
@@ -368,11 +349,17 @@ class Phonebooth(commands.Cog):
         # guild_id -> last call info, used by report.py to identify partner after hangup/skip
         self._last_calls: dict[int, dict] = {}
         self._conn_by_channel: dict[int, dict] = {}
+        self._conn_miss_until: dict[int, float] = {}
         self._cfg_by_channel: dict[int, dict] = {}
         self._cfg_by_guild: dict[int, dict] = {}
         self._session: aiohttp.ClientSession | None = None
         self._wh_obj_cache: dict[str, discord.Webhook] = {}
+        self._channel_webhook_urls: dict[int, str] = {}
+        self._user_policy_cache: dict[int, tuple[float, bool, bool]] = {}
         self._ending_broken_connections: set[int] = set()
+        self._reaction_routes: dict[tuple[int, int], tuple[int, int]] = {}
+        self._reaction_times: dict[int, deque] = {}
+        self._relay_locks: dict[int, asyncio.Lock] = {}
         self._recovery_task: asyncio.Task | None = None
         self._cleanup_loop.start()
 
@@ -430,33 +417,30 @@ class Phonebooth(commands.Cog):
     def _cache_connection(self, conn: Optional[dict]) -> None:
         if not conn:
             return
-        self._conn_by_channel[int(conn["channel_a"])] = conn
-        self._conn_by_channel[int(conn["channel_b"])] = conn
+        for channel_id in (int(conn["channel_a"]), int(conn["channel_b"])):
+            self._conn_miss_until.pop(channel_id, None)
+            self._conn_by_channel[channel_id] = conn
 
     def _invalidate_connection(self, conn: Optional[dict]) -> None:
         if not conn:
             return
         self._conn_by_channel.pop(int(conn["channel_a"]), None)
         self._conn_by_channel.pop(int(conn["channel_b"]), None)
+        expiry = time.monotonic() + 30.0
+        self._conn_miss_until[int(conn["channel_a"])] = expiry
+        self._conn_miss_until[int(conn["channel_b"])] = expiry
 
     async def _get_connection_cached(self, channel_id: int) -> Optional[dict]:
         conn = self._conn_by_channel.get(int(channel_id))
         if conn:
             return conn
+        if self._conn_miss_until.get(int(channel_id), 0.0) > time.monotonic():
+            return None
         conn = await self.db.get_connection(channel_id)
         self._cache_connection(conn)
+        if not conn:
+            self._conn_miss_until[int(channel_id)] = time.monotonic() + 30.0
         return conn
-
-    async def _check_gif_admin(self, ctx: commands.Context) -> bool:
-        """Allow only server owner or administrators to manage GIF mode."""
-        if not ctx.guild:
-            return False
-        if ctx.author.id == ctx.guild.owner_id:
-            return True
-        if isinstance(ctx.author, discord.Member) and ctx.author.guild_permissions.administrator:
-            return True
-        await ctx.send("❌ Only server administrators or the server owner can use `f.gifmode`.")
-        return False
 
     # ── Queue timeout ─────────────────────────────────────────────────────────
 
@@ -624,8 +608,8 @@ class Phonebooth(commands.Cog):
         """Resume or expire persisted queues/calls after a bot restart."""
         await self.bot.wait_until_ready()
         try:
-            await self._recover_queue_entries()
             await self._recover_active_connections()
+            await self._recover_queue_entries()
         except Exception as exc:
             print(f"[recovery] phonebooth recovery failed: {exc}")
 
@@ -648,15 +632,40 @@ class Phonebooth(commands.Cog):
 
     async def _recover_active_connections(self) -> None:
         timeout_seconds = self.INACTIVITY_MINUTES * 60
-        for conn in await self.db.get_active_connections():
+        seen_channels: set[int] = set()
+        connections = sorted(
+            await self.db.get_active_connections(),
+            key=lambda item: (item.get("started_at") or "", int(item["id"])),
+        )
+        for conn in connections:
             conn_id = int(conn["id"])
+            channel_a = int(conn["channel_a"])
+            channel_b = int(conn["channel_b"])
+            if channel_a in seen_channels or channel_b in seen_channels:
+                await self.db.remove_connection(conn_id)
+                for channel_id in (channel_a, channel_b):
+                    channel = self.bot.get_channel(channel_id)
+                    if channel:
+                        try:
+                            await channel.send(
+                                "📵 A conflicting duplicate call was cleared after restart. "
+                                "Use `f.call` to connect again."
+                            )
+                        except discord.HTTPException:
+                            pass
+                continue
+            seen_channels.update((channel_a, channel_b))
+            await asyncio.gather(
+                self.db.remove_from_queue(channel_a),
+                self.db.remove_from_queue(channel_b),
+            )
             last_activity = conn.get("last_activity_at") or conn.get("started_at")
             elapsed = _elapsed_seconds(last_activity)
             if elapsed >= timeout_seconds:
                 await self._inactivity_timer(
                     conn_id,
-                    int(conn["channel_a"]),
-                    int(conn["channel_b"]),
+                    channel_a,
+                    channel_b,
                     0,
                 )
                 continue
@@ -664,8 +673,8 @@ class Phonebooth(commands.Cog):
             self._cache_connection(conn)
             self._reset_inactivity(
                 conn_id,
-                int(conn["channel_a"]),
-                int(conn["channel_b"]),
+                channel_a,
+                channel_b,
                 timeout_seconds - elapsed,
             )
 
@@ -691,19 +700,48 @@ class Phonebooth(commands.Cog):
         self._rl_times.pop(channel_id, None)
         self._rl_warns.pop(channel_id, None)
 
-    @tasks.loop(minutes=30)
+    @tasks.loop(minutes=5)
     async def _cleanup_loop(self) -> None:
-        pass
+        now = datetime.utcnow()
+        for report in await self.db.get_open_gif_report_prompts():
+            session_active = False
+            if report.get("session_type") == "call" and report.get("session_id"):
+                session_active = bool(await self.db.get_connection_by_id(report["session_id"]))
+            elif report.get("session_type") == "room" and report.get("session_id"):
+                room = await self.db.get_room_by_id(report["session_id"])
+                session_active = bool(room and room["status"] in {"waiting", "active"})
+            if session_active:
+                continue
+            if not report.get("expires_at"):
+                await self.db.set_gif_report_expiry(
+                    report["id"], (now + timedelta(minutes=30)).isoformat()
+                )
+                continue
+            if datetime.fromisoformat(report["expires_at"]) > now:
+                continue
+            channel = self.bot.get_channel(report.get("prompt_channel_id"))
+            if channel:
+                try:
+                    prompt = await channel.fetch_message(report["prompt_msg_id"])
+                    await prompt.delete()
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    pass
+            await self.db.resolve_gif_report(report["id"], "expired")
 
     # ── Webhook helpers ───────────────────────────────────────────────────────
 
     async def get_or_create_webhook(self, channel: discord.TextChannel) -> Optional[str]:
+        cached = self._channel_webhook_urls.get(channel.id)
+        if cached:
+            return cached
         try:
             webhooks = await channel.webhooks()
             for wh in webhooks:
                 if wh.user == self.bot.user and wh.name == "Fliphone":
+                    self._channel_webhook_urls[channel.id] = wh.url
                     return wh.url
             wh = await channel.create_webhook(name="Fliphone")
+            self._channel_webhook_urls[channel.id] = wh.url
             return wh.url
         except discord.Forbidden:
             return None
@@ -723,6 +761,8 @@ class Phonebooth(commands.Cog):
             ("Embed Links", perms.embed_links),
             ("Read Message History", perms.read_message_history),
             ("Manage Webhooks", perms.manage_webhooks),
+            ("Attach Files", perms.attach_files),
+            ("Add Reactions", perms.add_reactions),
         )
         return [name for name, allowed in required if not allowed]
 
@@ -739,7 +779,7 @@ class Phonebooth(commands.Cog):
         if not webhook_url:
             return None, ["Webhook access failed"]
 
-        await self.db.update_webhook(channel.id, webhook_url)
+        asyncio.create_task(self.db.update_webhook(channel.id, webhook_url))
         cfg = self._cfg_by_channel.get(channel.id)
         if cfg is not None:
             cfg["webhook_url"] = webhook_url
@@ -773,11 +813,24 @@ class Phonebooth(commands.Cog):
                 return None, ["This channel already has Discord's maximum number of webhooks"]
             return None, ["Discord webhook creation failed"]
 
+        self._channel_webhook_urls[channel.id] = webhook_url
         await self.db.update_webhook(channel.id, webhook_url)
         cfg = self._cfg_by_channel.get(channel.id)
         if cfg is not None:
             cfg["webhook_url"] = webhook_url
         return webhook_url, []
+
+    async def _get_user_relay_policy(self, user_id: int) -> tuple[bool, bool]:
+        now = time.monotonic()
+        cached = self._user_policy_cache.get(user_id)
+        if cached and cached[0] > now:
+            return cached[1], cached[2]
+        banned, anonymous = await asyncio.gather(
+            self.db.is_user_banned(user_id),
+            self.db.is_user_anonymous(user_id),
+        )
+        self._user_policy_cache[user_id] = (now + 60, banned, anonymous)
+        return banned, anonymous
 
     async def probe_webhook_avatar(
         self,
@@ -836,6 +889,29 @@ class Phonebooth(commands.Cog):
                     )
                 except discord.HTTPException:
                     pass
+
+    async def _claim_valid_queue_match(
+        self,
+        *,
+        guild_id: int,
+        channel_id: int,
+        webhook_url: str,
+    ) -> Optional[dict]:
+        """Validate and atomically claim one queued partner."""
+        for _ in range(3):
+            match = await self._get_valid_queue_match(guild_id, channel_id)
+            if not match:
+                return None
+            claimed = await self.db.claim_queue_connection(
+                channel_a=channel_id,
+                guild_a=guild_id,
+                webhook_a=webhook_url,
+                channel_b=match["channel_id"],
+                webhook_b=match["webhook_url"],
+            )
+            if claimed:
+                return {"connection": claimed, "match": match}
+        return None
 
     async def _end_broken_connection(self, conn: dict) -> None:
         """End a call instead of exposing relay content through plain bot fallback."""
@@ -932,63 +1008,6 @@ class Phonebooth(commands.Cog):
         self._cache_connection(conn)
         return webhook_url
 
-    async def _send_gifmode_connect_notices(
-        self,
-        channel_a: discord.abc.Messageable,
-        guild_a_id: int,
-        channel_b: Optional[discord.abc.Messageable],
-        guild_b_id: int,
-    ) -> None:
-        """Send GIF mode notices to both sides right after a call connects."""
-        mode_a = (await self.db.get_gif_mode(guild_a_id)).lower()
-        mode_b = (await self.db.get_gif_mode(guild_b_id)).lower()
-
-        async def _send(ch, text: str) -> None:
-            if not ch:
-                return
-            try:
-                await ch.send(text, delete_after=15)
-            except discord.HTTPException:
-                pass
-
-        if mode_a == "disabled":
-            await _send(
-                channel_a,
-                "🚫 Your server has GIFs disabled — you won't be able to send or receive GIFs in this call.",
-            )
-            await _send(
-                channel_b,
-                "🎭 The other server has GIFs disabled. They may not see everything you send.",
-            )
-        elif mode_a == "limited":
-            await _send(
-                channel_a,
-                "⚠️ Your server has GIFs limited — only Tenor, Giphy, and Klipy links will be shown.",
-            )
-            await _send(
-                channel_b,
-                "🎭 The other server has GIFs limited. They may not see everything you send.",
-            )
-
-        if mode_b == "disabled":
-            await _send(
-                channel_b,
-                "🚫 Your server has GIFs disabled — you won't be able to send or receive GIFs in this call.",
-            )
-            await _send(
-                channel_a,
-                "🎭 The other server has GIFs disabled. They may not see everything you send.",
-            )
-        elif mode_b == "limited":
-            await _send(
-                channel_b,
-                "⚠️ Your server has GIFs limited — only Tenor, Giphy, and Klipy links will be shown.",
-            )
-            await _send(
-                channel_a,
-                "🎭 The other server has GIFs limited. They may not see everything you send.",
-            )
-
     # ── Message relay ─────────────────────────────────────────────────────────
 
     async def _relay(self, message: discord.Message, conn: dict) -> None:
@@ -1005,17 +1024,11 @@ class Phonebooth(commands.Cog):
                 msg_id=msg_id,
                 channel_id=target_cid,
                 guild_id=target_gid,
+                session_type="call",
+                session_id=conn["id"],
             )
-            report_embed = discord.Embed(
-                title="🚩 GIF Safety Check",
-                description=(
-                    "Report this GIF if it breaks the rules.\n"
-                    "Safe/approved GIFs cannot be reported."
-                ),
-                color=0x2b2d31,
-            )
-            report_embed.set_footer(text=f"Report #{report_id} • {config.FOOTER}")
-            await send_channel.send(embed=report_embed, view=GifReportView())
+            prompt = await send_channel.send(view=GifReportView(), silent=True)
+            await self.db.set_gif_report_prompt(report_id, prompt.id, prompt.channel.id)
 
         # ── Rate limiting (sync — no DB needed) ──────────────────────────────
         if self._call_is_rate_limited(message.channel.id):
@@ -1033,10 +1046,7 @@ class Phonebooth(commands.Cog):
             return
 
         # ── Ban check + config fetch in parallel ──────────────────────────────
-        is_banned, cfg = await asyncio.gather(
-            self.db.is_user_banned(message.author.id),
-            self._get_guild_config_cached(message.guild.id),
-        )
+        is_banned, anon = await self._get_user_relay_policy(message.author.id)
         if is_banned:
             try:
                 await message.channel.send(
@@ -1048,10 +1058,8 @@ class Phonebooth(commands.Cog):
             return
 
         # ── Identity ──────────────────────────────────────────────────────────
-        anon = cfg.get("anonymous", 0) if cfg else 0
-
         if anon:
-            seed = conn["id"] * 1000 + (conn["guild_a"] if is_side_a else conn["guild_b"])
+            seed = conn["id"] * 100000 + message.author.id
             display_name, avatar_url = _anon_identity(seed)
         else:
             member       = message.author
@@ -1100,6 +1108,18 @@ class Phonebooth(commands.Cog):
         # ── Content ───────────────────────────────────────────────────────────
         raw_content = (message.content or "")
 
+        if is_local_only(raw_content):
+            return
+
+        if contains_custom_emoji(raw_content):
+            try:
+                await message.channel.send(
+                    "Custom server emojis are not relayed. Use regular keyboard emojis instead.",
+                    delete_after=8,
+                )
+            except discord.HTTPException:
+                pass
+
         content, was_censored = filter_message(raw_content)
         if was_censored:
             try:
@@ -1130,7 +1150,7 @@ class Phonebooth(commands.Cog):
         # Every other link is removed — no external URLs get relayed.
         non_gif_links = [
             url for url in LINK_PATTERN.findall(content)
-            if not GIF_LINK_PATTERN.match(url)
+            if not is_provider_gif(url) and not is_direct_gif_url(url)
         ]
         if non_gif_links:
             for url in non_gif_links:
@@ -1145,7 +1165,10 @@ class Phonebooth(commands.Cog):
                 pass
 
         # ── Detect GIF URLs in text content ───────────────────────────────────
-        inline_gif_urls: list[str] = GIF_LINK_PATTERN.findall(content)
+        inline_gif_urls = [
+            url for url in extract_urls(content)
+            if is_provider_gif(url) or is_direct_gif_url(url)
+        ]
 
         # ── Attachments ───────────────────────────────────────────────────────
         GIF_EXT = {".gif"}
@@ -1182,22 +1205,34 @@ class Phonebooth(commands.Cog):
                 seen_norms.add(n)
                 all_gif_urls.append(u)
 
-        safe_urls = list(all_gif_urls)
-        if all_gif_urls:
-            sender_gid = conn["guild_a"] if is_side_a else conn["guild_b"]
-            sender_gif_mode, receiver_gif_mode = await self.db.get_gif_modes_bulk(sender_gid, target_gid)
-            if sender_gif_mode == "disabled" or receiver_gif_mode == "disabled":
-                safe_urls = []
-            elif sender_gif_mode == "limited" or receiver_gif_mode == "limited":
-                safe_urls = [
-                    u for u in safe_urls
-                    if "tenor.com" in u.lower() or "giphy.com" in u.lower() or "klipy.com" in u.lower()
-                ]
+        safe_urls: list[str] = []
+        gif_statuses = await asyncio.gather(
+            *[self.db.check_gif_url(url) for url in all_gif_urls],
+            return_exceptions=True,
+        ) if all_gif_urls else []
+        gif_status_by_url = {
+            url: (None if isinstance(status, Exception) else status)
+            for url, status in zip(all_gif_urls, gif_statuses)
+        }
+        for url, status in zip(all_gif_urls, gif_statuses):
+            if status == "blacklist":
+                continue
+            if is_provider_gif(url) or status == "whitelist":
+                safe_urls.append(url)
 
         for gif_url in [u for u in all_gif_urls if u not in safe_urls]:
             content = content.replace(gif_url, "")
         content = content.strip()
         all_gif_urls = safe_urls
+
+        if inline_gif_urls and not safe_urls:
+            try:
+                await message.channel.send(
+                    "That GIF source is not approved. Run `f.addgif`, then send it again within 60 seconds for review.",
+                    delete_after=8,
+                )
+            except discord.HTTPException:
+                pass
 
         # ── Blacklist + per-call reported check ──────────────────────────────
         def _norm(u: str) -> str:
@@ -1206,11 +1241,8 @@ class Phonebooth(commands.Cog):
         call_reported = self._call_reported_gifs.get(conn["id"], set())
         blocked_urls: set[str] = set()
         if all_gif_urls:
-            gif_statuses = await asyncio.gather(
-                *[self.db.check_gif_url(u) for u in all_gif_urls],
-                return_exceptions=True,
-            )
-            for gif_url, status in zip(all_gif_urls, gif_statuses):
+            for gif_url in all_gif_urls:
+                status = gif_status_by_url.get(gif_url)
                 norm_url = _norm(gif_url)
                 if status == "blacklist" or norm_url in call_reported:
                     blocked_urls.add(gif_url)
@@ -1225,7 +1257,12 @@ class Phonebooth(commands.Cog):
                 pass
 
         # GIFs that are not blocked — these get report cards
-        reportable_gif_urls = [u for u in all_gif_urls if u not in blocked_urls]
+        reportable_gif_urls = []
+        for url in all_gif_urls:
+            if url in blocked_urls:
+                continue
+            if gif_status_by_url.get(url) != "whitelist":
+                reportable_gif_urls.append(url)
 
         # Keep GIF replies in one webhook message so reply context stays attached.
         if reply_embed and reportable_gif_urls:
@@ -1262,6 +1299,7 @@ class Phonebooth(commands.Cog):
                 username=str(message.author),
                 guild_id=message.guild.id,
                 guild_name=message.guild.name,
+                content=content.strip(),
             )
         need_id = bool(reportable_gif_urls)
         target_channel = self.bot.get_channel(target_cid)
@@ -1272,7 +1310,7 @@ class Phonebooth(commands.Cog):
         if target_wh:
             main_wh_msg = await self._send_webhook(
                 target_wh, text_content, display_name, avatar_url, files,
-                reply_embed=reply_embed, wait=need_id, silent=bool(reportable_gif_urls),
+                reply_embed=reply_embed, wait=True, silent=bool(reportable_gif_urls),
             )
             if not main_wh_msg and target_channel:
                 repaired_wh = await self._repair_relay_webhook(target_channel, conn)
@@ -1280,9 +1318,11 @@ class Phonebooth(commands.Cog):
                     target_wh = repaired_wh
                     main_wh_msg = await self._send_webhook(
                         target_wh, text_content, display_name, avatar_url, files,
-                        reply_embed=reply_embed, wait=need_id, silent=bool(reportable_gif_urls),
+                        reply_embed=reply_embed, wait=True, silent=bool(reportable_gif_urls),
                     )
             if main_wh_msg:
+                self._reaction_routes[(message.channel.id, message.id)] = (target_cid, main_wh_msg.id)
+                self._reaction_routes[(target_cid, main_wh_msg.id)] = (message.channel.id, message.id)
                 asyncio.create_task(
                     self.db.add_chat_xp(
                         message.author.id,
@@ -1309,6 +1349,39 @@ class Phonebooth(commands.Cog):
 
         await self._end_broken_connection(conn)
 
+    async def _relay_reaction(self, payload: discord.RawReactionActionEvent, *, remove: bool) -> None:
+        if not self.bot.user or payload.user_id == self.bot.user.id or payload.emoji.id is not None:
+            return
+        route = self._reaction_routes.get((payload.channel_id, payload.message_id))
+        if not route:
+            return
+        now = time.monotonic()
+        times = self._reaction_times.setdefault(payload.user_id, deque())
+        while times and now - times[0] > 10:
+            times.popleft()
+        if len(times) >= 5:
+            return
+        times.append(now)
+        channel = self.bot.get_channel(route[0])
+        if not channel:
+            return
+        try:
+            target = await channel.fetch_message(route[1])
+            if remove:
+                await target.remove_reaction(str(payload.emoji), self.bot.user)
+            else:
+                await target.add_reaction(str(payload.emoji))
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
+        await self._relay_reaction(payload, remove=False)
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent) -> None:
+        await self._relay_reaction(payload, remove=True)
+
     # ── on_message ────────────────────────────────────────────────────────────
 
     @commands.Cog.listener()
@@ -1317,13 +1390,25 @@ class Phonebooth(commands.Cog):
             return
         if not message.guild:
             return
+        gif_cog = self.bot.get_cog("GifSubmission")
+        if gif_cog and (gif_cog.is_consumed(message.id) or await gif_cog.consume_capture(message)):
+            return
+        if is_local_only(message.content or ""):
+            return
         ctx = await self.bot.get_context(message)
         if ctx.valid:
             return
         conn = await self._get_connection_cached(message.channel.id)
         if not conn:
             return
-        await self._relay(message, conn)
+        target_channel_id = (
+            int(conn["channel_b"])
+            if message.channel.id == int(conn["channel_a"])
+            else int(conn["channel_a"])
+        )
+        lock = self._relay_locks.setdefault(target_channel_id, asyncio.Lock())
+        async with lock:
+            await self._relay(message, conn)
 
     # ── f.call ────────────────────────────────────────────────────────────────
 
@@ -1369,29 +1454,18 @@ class Phonebooth(commands.Cog):
                 "A server admin should run `f.setup` in this channel."
             )
             return
-        match = await self._get_valid_queue_match(ctx.guild.id, ctx.channel.id)
+        claimed = await self._claim_valid_queue_match(
+            guild_id=ctx.guild.id,
+            channel_id=ctx.channel.id,
+            webhook_url=wh_url,
+        )
 
-        if match:
+        if claimed:
+            match = claimed["match"]
+            new_conn = claimed["connection"]
             self._cancel_timeout(match["channel_id"])
             self._cancel_queue_nudge(match["channel_id"])
-            await self.db.remove_from_queue(match["channel_id"])
-            started_at = datetime.utcnow().isoformat()
-            conn_id = await self.db.create_connection(
-                channel_a=ctx.channel.id, guild_a=ctx.guild.id, webhook_a=wh_url,
-                channel_b=match["channel_id"], guild_b=match["guild_id"], webhook_b=match["webhook_url"],
-                started_at=started_at,
-            )
-            new_conn = {
-                "id": conn_id,
-                "channel_a": ctx.channel.id,
-                "guild_a": ctx.guild.id,
-                "webhook_a": wh_url,
-                "channel_b": match["channel_id"],
-                "guild_b": match["guild_id"],
-                "webhook_b": match["webhook_url"],
-                "started_at": started_at,
-                "msg_count": 0,
-            }
+            conn_id = int(new_conn["id"])
             self._cache_connection(new_conn)
             await ctx.send(_CONNECTED_MSG)
             partner_channel = self.bot.get_channel(match["channel_id"])
@@ -1400,12 +1474,6 @@ class Phonebooth(commands.Cog):
                     await partner_channel.send(_CONNECTED_MSG)
                 except discord.HTTPException:
                     pass
-            await self._send_gifmode_connect_notices(
-                channel_a=ctx.channel,
-                guild_a_id=ctx.guild.id,
-                channel_b=partner_channel,
-                guild_b_id=match["guild_id"],
-            )
             # Start inactivity timer for this call
             self._reset_inactivity(conn_id, ctx.channel.id, match["channel_id"])
             # Anon mode notifications
@@ -1428,6 +1496,11 @@ class Phonebooth(commands.Cog):
                 except discord.HTTPException:
                     pass
         else:
+            current = await self.db.get_connection(ctx.channel.id)
+            if current:
+                self._cache_connection(current)
+                await ctx.send("☎️ This channel was already connected by another call request.")
+                return
             search_msg = await ctx.send("📳 **Searching for someone to talk to...**")
             await self.db.add_to_queue(
                 channel_id=ctx.channel.id, guild_id=ctx.guild.id,
@@ -1574,29 +1647,18 @@ class Phonebooth(commands.Cog):
                 "A server admin should run `f.setup` in this channel."
             )
             return
-        match = await self._get_valid_queue_match(ctx.guild.id, ctx.channel.id)
+        claimed = await self._claim_valid_queue_match(
+            guild_id=ctx.guild.id,
+            channel_id=ctx.channel.id,
+            webhook_url=wh_url,
+        )
 
-        if match:
+        if claimed:
+            match = claimed["match"]
+            new_conn = claimed["connection"]
             self._cancel_timeout(match["channel_id"])
             self._cancel_queue_nudge(match["channel_id"])
-            await self.db.remove_from_queue(match["channel_id"])
-            started_at = datetime.utcnow().isoformat()
-            conn_id = await self.db.create_connection(
-                channel_a=ctx.channel.id, guild_a=ctx.guild.id, webhook_a=wh_url,
-                channel_b=match["channel_id"], guild_b=match["guild_id"], webhook_b=match["webhook_url"],
-                started_at=started_at,
-            )
-            new_conn = {
-                "id": conn_id,
-                "channel_a": ctx.channel.id,
-                "guild_a": ctx.guild.id,
-                "webhook_a": wh_url,
-                "channel_b": match["channel_id"],
-                "guild_b": match["guild_id"],
-                "webhook_b": match["webhook_url"],
-                "started_at": started_at,
-                "msg_count": 0,
-            }
+            conn_id = int(new_conn["id"])
             self._cache_connection(new_conn)
             await ctx.send(_CONNECTED_MSG)
             partner_channel = self.bot.get_channel(match["channel_id"])
@@ -1605,14 +1667,13 @@ class Phonebooth(commands.Cog):
                     await partner_channel.send(_CONNECTED_MSG)
                 except discord.HTTPException:
                     pass
-            await self._send_gifmode_connect_notices(
-                channel_a=ctx.channel,
-                guild_a_id=ctx.guild.id,
-                channel_b=partner_channel,
-                guild_b_id=match["guild_id"],
-            )
             self._reset_inactivity(conn_id, ctx.channel.id, match["channel_id"])
         else:
+            current = await self.db.get_connection(ctx.channel.id)
+            if current:
+                self._cache_connection(current)
+                await ctx.send("☎️ This channel was already connected by another call request.")
+                return
             await self.db.add_to_queue(
                 channel_id=ctx.channel.id, guild_id=ctx.guild.id,
                 user_id=ctx.author.id, webhook_url=wh_url,
@@ -1675,11 +1736,33 @@ class Phonebooth(commands.Cog):
 
     @commands.hybrid_command(name="block")
     @commands.guild_only()
-    async def block(self, ctx: commands.Context) -> None:
+    async def block(self, ctx: commands.Context, station: Optional[str] = None) -> None:
         """Block the server you're currently connected to."""
         conn = await self._get_connection_cached(ctx.channel.id)
         if not conn:
-            await ctx.send("❌ You can only block a server while in an active call.")
+            room_member = await self.db.get_room_member(ctx.channel.id)
+            if not room_member:
+                await ctx.send("❌ You can only block a server while in an active call or room.")
+                return
+            if not station:
+                await ctx.send("Specify a station: `f.block <station>`.")
+                return
+            members = await self.db.get_room_members(room_member["room_id"])
+            wanted = station.strip().capitalize()
+            target = next((item for item in members if item["station"] == wanted), None)
+            if not target or target["channel_id"] == ctx.channel.id:
+                await ctx.send("❌ That station is not available in this room.")
+                return
+            await self.db.block_guild(ctx.guild.id, target["guild_id"], ctx.author.id)
+            room_cog = self.bot.get_cog("Room")
+            if room_cog:
+                await room_cog._remove_member(
+                    ctx.channel.id,
+                    room_member["room_id"],
+                    broadcast_reason=f"📡 **Station {room_member['station']}** left the room.",
+                    notify_leaver=False,
+                )
+            await ctx.send(f"🚫 Station {wanted} was blocked. You have left this room.")
             return
 
         is_a        = ctx.channel.id == conn["channel_a"]
@@ -1869,7 +1952,10 @@ class Phonebooth(commands.Cog):
             xp = int(row["xp"] or 0)
             level, _, _ = _level_from_xp(xp)
             guild = self.bot.get_guild(int(row["guild_id"]))
-            name = guild.name if guild else f"Server {int(row['guild_id'])}"
+            raw_name = guild.name if guild else "Unnamed Server"
+            filtered_name, _ = filter_message(raw_name)
+            name = re.sub(r"[\s\-_|:•]+", " ", filtered_name.replace("[censored]", " ")).strip()
+            name = name or "Unnamed Server"
             lines.append(
                 f"**#{index}** {discord.utils.escape_markdown(name)} "
                 f"• Level **{level}** "
@@ -1976,56 +2062,20 @@ class Phonebooth(commands.Cog):
         if not cfg and not guild_cfg:
             await ctx.send("❌ Fliphone isn't set up. An admin should run `f.setup` first.")
             return
-        is_anon = await self.db.toggle_anonymous(ctx.guild.id)
-        self._invalidate_config(guild_id=ctx.guild.id, channel_id=ctx.channel.id)
+        is_anon = await self.db.toggle_user_anonymous(ctx.author.id)
+        self._user_policy_cache.pop(ctx.author.id, None)
         if is_anon:
-            await ctx.send("🎭 **Anonymous mode ON** — messages from this server will appear as *Stranger [Name]*.")
+            await ctx.send("🎭 **Mask ON** — your relayed messages will use a stable Stranger identity in each conversation.")
         else:
-            await ctx.send("👤 **Anonymous mode OFF** — messages will show filtered display names and avatars.")
-
-    # ── f.gifmode ────────────────────────────────────────────────────────────
-
-    @commands.hybrid_command(name="gifmode")
-    @commands.guild_only()
-    async def gifmode(self, ctx: commands.Context, mode: Optional[str] = None) -> None:
-        """Set or view GIF relay mode for this server."""
-        if not await self._check_gif_admin(ctx):
-            return
-
-        guild_cfg = await self._get_guild_config_cached(ctx.guild.id)
-        if not guild_cfg:
-            await ctx.send("❌ Fliphone isn't set up. An admin should run `f.setup` first.")
-            return
-
-        if mode is None:
-            current_mode = await self.db.get_gif_mode(ctx.guild.id)
-            await ctx.send(
-                "🎞️ GIF mode is currently set to "
-                f"**{current_mode}**. Use `f.gifmode <enabled|limited|disabled>` to change it."
-            )
-            return
-
-        new_mode = mode.lower().strip()
-        if new_mode not in {"enabled", "limited", "disabled"}:
-            await ctx.send("❌ Invalid mode. Use `enabled`, `limited`, or `disabled`.")
-            return
-
-        await self.db.set_gif_mode(ctx.guild.id, new_mode)
-        await ctx.send(f"✅ GIF mode updated to **{new_mode}**.")
+            await ctx.send("👤 **Mask OFF** — your relayed messages will show your filtered display name and avatar.")
 
     # ── f.fr / f.friendrequest ────────────────────────────────────────────────
 
     @commands.hybrid_command(name="friendrequest", aliases=["fr"])
     @commands.guild_only()
-    async def friendrequest(self, ctx: commands.Context) -> None:
+    async def friendrequest(self, ctx: commands.Context, station: Optional[str] = None) -> None:
         """Share your Discord username with the person you're talking to."""
         conn = await self._get_connection_cached(ctx.channel.id)
-        if not conn:
-            await ctx.send("❌ You can only share your friend request info during an active call.")
-            return
-
-        is_a      = ctx.channel.id == conn["channel_a"]
-        other_cid = conn["channel_b"] if is_a else conn["channel_a"]
         member    = ctx.author
 
         def _fr_embed() -> discord.Embed:
@@ -2044,13 +2094,37 @@ class Phonebooth(commands.Cog):
             embed.set_footer(text="Copy the username above to send a friend request.")
             return embed
 
+        target_channels: list[int] = []
+        if conn:
+            is_a = ctx.channel.id == conn["channel_a"]
+            target_channels.append(conn["channel_b"] if is_a else conn["channel_a"])
+        else:
+            room_member = await self.db.get_room_member(ctx.channel.id)
+            if not room_member:
+                await ctx.send("❌ You can only share friend-request info during an active call or room.")
+                return
+            room_members = await self.db.get_room_members(room_member["room_id"])
+            if station:
+                wanted = station.strip().capitalize()
+                target = next((item for item in room_members if item["station"] == wanted), None)
+                if not target or target["channel_id"] == ctx.channel.id:
+                    await ctx.send("❌ That station is not available in this room.")
+                    return
+                target_channels.append(target["channel_id"])
+            else:
+                target_channels.extend(
+                    item["channel_id"] for item in room_members
+                    if item["channel_id"] != ctx.channel.id
+                )
+
         await ctx.send(embed=_fr_embed())
-        other_ch = self.bot.get_channel(other_cid)
-        if other_ch:
-            try:
-                await other_ch.send(embed=_fr_embed())
-            except discord.HTTPException:
-                pass
+        for channel_id in target_channels:
+            other_ch = self.bot.get_channel(channel_id)
+            if other_ch:
+                try:
+                    await other_ch.send(embed=_fr_embed())
+                except discord.HTTPException:
+                    pass
 
 
 async def setup(bot):

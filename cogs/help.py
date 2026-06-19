@@ -1,4 +1,4 @@
-"""Help commands for Fliphone."""
+"""Paged public help and a separate restricted-tool reference."""
 
 from __future__ import annotations
 
@@ -10,156 +10,173 @@ from discord.ext import commands
 import config
 
 
-PUBLIC_COMMANDS = [
-    ("Calling", "call", ["c", "dial", "connect"], "f.call", "Join the 1:1 queue or connect instantly.", "Everyone"),
-    ("Calling", "hangup", ["h", "disconnect", "bye"], "f.hangup", "End a call or leave the queue.", "Everyone"),
-    ("Calling", "skip", ["s", "next"], "f.skip", "Leave the current call and search again.", "Everyone"),
-    ("Calling", "status", ["pbstatus"], "f.status", "Show this channel's call/queue state.", "Everyone"),
-    ("Calling", "block", [], "f.block", "Block the server you are currently talking to.", "Everyone"),
-    ("Calling", "friendrequest", ["fr"], "f.fr", "Share your Discord username during a call.", "Everyone"),
-    ("Calling", "notify", ["notifications"], "f.notify", "Toggle queue notification DMs.", "Everyone"),
-    ("Calling", "profile", ["settings", "me"], "f.profile", "Show your level, XP, rank, and profile banner.", "Everyone"),
-    ("Calling", "banner", ["profilebanner"], "f.banner", "Reroll your profile banner.", "Everyone"),
-    ("Calling", "report", [], "f.report", "Report your active or most recent call.", "Everyone"),
-    ("Calling", "leaderboard", ["lb", "levels", "rankings"], "f.lb", "Show the global Fliphone user XP leaderboard.", "Everyone"),
-    ("Calling", "serverlb", ["slb", "serverleaderboard"], "f.serverlb", "Show the global Fliphone server XP leaderboard.", "Everyone"),
-    ("Rooms", "room", ["r"], "f.room", "Join a group room with up to 6 servers.", "Everyone"),
-    ("Rooms", "roomleave", ["rl"], "f.roomleave", "Leave your current group room.", "Everyone"),
-    ("Rooms", "roomskip", ["rs"], "f.roomskip", "Leave and immediately search for a new room.", "Everyone"),
-    ("Rooms", "roomstatus", ["rst"], "f.roomstatus", "Show current room status.", "Everyone"),
-    ("Rooms", "roomkick", ["rk"], "f.roomkick <station>", "Start a room vote-kick.", "Everyone"),
-    ("Server Admin", "setup", [], "f.setup [#channel]", "Reset and fully set up Fliphone in one step.", "Manage Channels"),
-    ("Server Admin", "check", ["setupcheck", "doctor"], "f.check", "Diagnose broken setup, permissions, webhook, and state.", "Manage Channels"),
-    ("Server Admin", "repair", ["fixsetup", "fix"], "f.repair [#channel]", "Reset and rebuild the current setup.", "Manage Channels"),
-    ("Server Admin", "teardown", ["remove"], "f.teardown", "Fully remove Fliphone so setup starts clean.", "Manage Channels"),
-    ("Server Admin", "anon", ["mask", "anonymous"], "f.anon", "Toggle anonymous relay mode for this server.", "Server members"),
-    ("Server Admin", "gifmode", [], "f.gifmode <enabled|limited|disabled>", "Set this server's GIF relay mode.", "Server Admin"),
-    ("Server Admin", "blocklist", ["blocked"], "f.blocklist", "List servers blocked by this server.", "Manage Channels"),
-    ("Server Admin", "unblock", [], "f.unblock <server_id>", "Remove a server from your blocklist.", "Manage Channels"),
-    ("Server Admin", "kick", [], "f.kick", "Force-disconnect this server's active call.", "Manage Channels"),
-    ("Info", "stats", [], "f.stats", "Show global call, queue, and server stats.", "Everyone"),
-    ("Info", "invite", [], "f.invite", "Get the bot invite link.", "Everyone"),
-    ("Info", "ping", [], "f.ping", "Check bot latency.", "Everyone"),
+CALL_COMMANDS = [
+    ("call", "f.call", "Join the 1:1 queue."),
+    ("hangup", "f.hangup", "End this channel's call or leave its queue."),
+    ("skip", "f.skip", "End this channel's call and search again."),
+    ("status", "f.status", "Show this channel's call state."),
+    ("block", "f.block", "Block the connected server and end the call."),
+    ("friendrequest", "f.fr", "Share your Discord username in the conversation."),
+    ("mask", "f.mask", "Toggle your personal Stranger identity."),
+    ("notify", "f.notify", "Toggle queue notification DMs."),
+    ("addgif", "f.addgif", "Submit a GIF URL for safe relay approval."),
+    ("report", "f.report", "Report the active or most recent conversation."),
+    ("profile", "f.profile", "Show your level, XP, ranks, and banner."),
+    ("banner", "f.banner", "Reroll your profile banner."),
+    ("leaderboard", "f.lb", "Show the global user XP leaderboard."),
+    ("serverlb", "f.serverlb", "Show the global server XP leaderboard."),
+    ("vote", "f.vote or /vote", "Open Fliphone's top.gg page."),
+]
+
+ROOM_COMMANDS = [
+    ("room", "f.room", "Join an available room of up to 5 servers."),
+    ("roomcreate", "f.roomcreate", "Create a fresh room."),
+    ("roomleave", "f.roomleave", "Leave this channel's room."),
+    ("roomskip", "f.roomskip", "Leave and find a different room."),
+    ("roomstatus", "f.roomstatus", "Show stations and room state."),
+    ("roomkick", "f.roomkick <station>", "Start a station vote-kick."),
+    ("friendrequest", "f.fr [station]", "Share with everyone or one station."),
+    ("block", "f.block <station>", "Block a station and leave the room."),
+    ("report", "f.report <station>", "Report one station."),
+]
+
+ADMIN_COMMANDS = [
+    ("setup", "f.setup [#channel]", "Reset and configure Fliphone in one step."),
+    ("check", "f.check", "Diagnose permissions, webhook, and current state."),
+    ("repair", "f.repair [#channel]", "Rebuild a damaged setup."),
+    ("teardown", "f.teardown", "Remove setup after confirmation."),
+    ("blocklist", "f.blocklist", "List servers blocked by this server."),
+    ("unblock", "f.unblock <server_id>", "Remove a server block."),
+    ("kick", "f.kick", "End the call in the channel where it is run."),
 ]
 
 SUDO_COMMANDS = [
-    ("Owner", "sudohelp", [], "f.sudohelp", "Show this restricted command list.", "Owner / trusted mods"),
-    ("Owner", "dbstatus", ["database", "db"], "f.dbstatus", "Show database backend health and safe row counts.", "Owner / trusted mods"),
-    ("Owner", "ban", [], "f.ban <user_id> [reason]", "Bot-wide user ban.", "Owner only"),
-    ("Owner", "unban", [], "f.unban <user_id>", "Lift a bot-wide user ban.", "Owner only"),
-    ("Owner", "notifyignore", [], "f.notifyignore <user_id>", "Exclude a tester from queue notify broadcasts.", "Owner only"),
-    ("Moderation", "censor", [], "f.censor <word>", "Toggle a custom censored word.", "Owner / trusted mods"),
-    ("Moderation", "censorlist", [], "f.censorlist", "List custom censored words.", "Owner / trusted mods"),
-    ("Owner", "guilds", ["servers", "serverlist"], "f.guilds", "List guilds the bot is in.", "Owner only"),
-    ("Owner", "leaveguild", ["leaveserver"], "f.leaveguild <guild_id>", "Force the bot to leave a guild.", "Owner only"),
-    ("Moderation", "gifreports", [], "f.gifreports", "Open the interactive GIF report panel.", "Owner / trusted mods"),
-    ("Moderation", "gifbl", [], "f.gifbl <id/url>", "Blacklist a GIF report or URL.", "Owner / trusted mods"),
-    ("Moderation", "gifwl", [], "f.gifwl <id/url>", "Whitelist a GIF report or URL.", "Owner / trusted mods"),
-    ("Moderation", "gifcheck", [], "f.gifcheck <url>", "Check GIF blacklist/whitelist status.", "Owner / trusted mods"),
-    ("Moderation", "userreports", [], "f.userreports", "Open the interactive call report panel.", "Owner / trusted mods"),
-    ("Moderation", "resolvereport", [], "f.resolvereport <id>", "Resolve a call report by ID.", "Owner / trusted mods"),
+    ("sudohelp", "f.sudohelp", "Show restricted tools."),
+    ("dbstatus", "f.dbstatus", "Check safe database health and row counts."),
+    ("ban", "f.ban <user_id> [reason]", "Apply a bot-wide user ban."),
+    ("unban", "f.unban <user_id>", "Remove a bot-wide user ban."),
+    ("notifyignore", "f.notifyignore <user_id>", "Exclude a tester from queue broadcasts."),
+    ("servers", "f.servers", "List servers containing the bot."),
+    ("leaveserver", "f.leaveserver <server_id>", "Force the bot to leave a server."),
+    ("censor", "f.censor <word>", "Toggle a custom censored word."),
+    ("censorlist", "f.censorlist", "List custom censored words."),
+    ("gifreports", "f.gifreports", "Review reported GIFs."),
+    ("userreports", "f.userreports", "Review conversation reports."),
+    ("resolvereport", "f.resolvereport <id>", "Resolve a conversation report."),
 ]
 
-
-def build_command_map(commands_list: list[tuple]) -> dict[str, tuple]:
-    command_map: dict[str, tuple] = {}
-    for entry in commands_list:
-        _, name, aliases, *_ = entry
-        command_map[name.lower()] = entry
-        for alias in aliases:
-            command_map[alias.lower()] = entry
-    return command_map
+ALL_PUBLIC = {name: item for item in CALL_COMMANDS + ROOM_COMMANDS + ADMIN_COMMANDS for name in [item[0]]}
+ALL_SUDO = {name: item for item in SUDO_COMMANDS for name in [item[0]]}
 
 
-PUBLIC_MAP = build_command_map(PUBLIC_COMMANDS)
-SUDO_MAP = build_command_map(SUDO_COMMANDS)
+def _command_lines(items: list[tuple[str, str, str]]) -> str:
+    return "\n".join(f"`{usage}` - {description}" for _name, usage, description in items)
 
+
+def _page_embed(page: int) -> discord.Embed:
+    if page == 0:
+        embed = discord.Embed(
+            title="Fliphone Help - Calls & Profile",
+            description="Commands for 1:1 conversations and your Fliphone profile.",
+            color=config.COLOR_WAIT,
+        )
+        embed.add_field(name="Commands", value=_command_lines(CALL_COMMANDS), inline=False)
+    elif page == 1:
+        embed = discord.Embed(
+            title="Fliphone Help - Rooms",
+            description=(
+                "Rooms connect up to five servers as named stations. They begin when a second "
+                "server joins and close after ten minutes without a relayed text message or GIF."
+            ),
+            color=config.COLOR_WAIT,
+        )
+        embed.add_field(name="Commands", value=_command_lines(ROOM_COMMANDS), inline=False)
+    else:
+        embed = discord.Embed(
+            title="Fliphone Help - Server Setup",
+            description="These commands require Manage Channels in the server.",
+            color=config.COLOR_WAIT,
+        )
+        embed.add_field(name="Commands", value=_command_lines(ADMIN_COMMANDS), inline=False)
+    embed.set_footer(text="Use f.help <command> for details. Restricted tools: f.sudohelp")
+    return embed
+
+
+class HelpView(discord.ui.View):
+    def __init__(self, page: int = 0) -> None:
+        super().__init__(timeout=180)
+        self.page = page
+        self.add_item(discord.ui.Button(label="Support", style=discord.ButtonStyle.link, url=config.SUPPORT_URL))
+        self.add_item(discord.ui.Button(label="Top.gg", style=discord.ButtonStyle.link, url=config.TOPGG_URL))
+        self.add_item(discord.ui.Button(label="Privacy", style=discord.ButtonStyle.link, url=config.PRIVACY_URL))
+        self.add_item(discord.ui.Button(label="Terms", style=discord.ButtonStyle.link, url=config.TOS_URL))
+        self._sync_buttons()
+
+    def _sync_buttons(self) -> None:
+        for item in self.children:
+            if isinstance(item, discord.ui.Button) and item.custom_id:
+                item.disabled = item.custom_id == f"help:{self.page}"
+
+    async def _show(self, interaction: discord.Interaction, page: int) -> None:
+        self.page = page
+        self._sync_buttons()
+        await interaction.response.edit_message(embed=_page_embed(page), view=self)
+
+    @discord.ui.button(label="Calls", style=discord.ButtonStyle.primary, custom_id="help:0")
+    async def calls(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await self._show(interaction, 0)
+
+    @discord.ui.button(label="Rooms", style=discord.ButtonStyle.primary, custom_id="help:1")
+    async def rooms(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await self._show(interaction, 1)
+
+    @discord.ui.button(label="Server Setup", style=discord.ButtonStyle.primary, custom_id="help:2")
+    async def setup(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await self._show(interaction, 2)
 
 class Help(commands.Cog):
     def __init__(self, bot) -> None:
         self.bot = bot
 
     async def _can_use_sudohelp(self, ctx: commands.Context) -> bool:
-        if await self.bot.is_owner(ctx.author):
-            return True
-        if ctx.author.id in config.TRUSTED_MOD_IDS:
-            return True
-        return False
-
-    def _detail_embed(self, entry: tuple) -> discord.Embed:
-        category, name, aliases, usage, description, permission = entry
-        embed = discord.Embed(
-            title=f"`{config.PREFIX}{name}`",
-            description=description,
-            color=config.COLOR_WAIT,
-        )
-        embed.add_field(name="Usage", value=f"`{usage}`", inline=True)
-        embed.add_field(name="Category", value=category, inline=True)
-        embed.add_field(name="Permission", value=permission, inline=True)
-        if aliases:
-            embed.add_field(
-                name="Aliases",
-                value="  ".join(f"`{config.PREFIX}{alias}`" for alias in aliases),
-                inline=False,
-            )
-        embed.set_footer(text=f"Tip: f.help <command> | {config.FOOTER}")
-        return embed
-
-    def _overview_embed(self, commands_list: list[tuple], *, sudo: bool = False) -> discord.Embed:
-        title = "Fliphone Sudo Help" if sudo else "Fliphone Help"
-        description = (
-            "Restricted owner/trusted-mod tools."
-            if sudo
-            else "User and server admin commands. Run `f.help <command>` for details."
-        )
-        embed = discord.Embed(title=title, description=description, color=0x5865F2)
-        categories: dict[str, list[tuple]] = {}
-        for entry in commands_list:
-            categories.setdefault(entry[0], []).append(entry)
-        for category, entries in categories.items():
-            lines = [
-                f"`{usage}` - {description}"
-                for _, _, _, usage, description, _ in entries
-            ]
-            embed.add_field(name=category, value="\n".join(lines), inline=False)
-        footer = "Use f.sudohelp for restricted tools." if not sudo else config.FOOTER
-        embed.set_footer(text=footer)
-        return embed
+        return await self.bot.is_owner(ctx.author) or ctx.author.id in config.TRUSTED_MOD_IDS
 
     @commands.command(name="help", aliases=["commands", "cmds"])
     async def help(self, ctx: commands.Context, *, command: Optional[str] = None) -> None:
-        """Show user/server-admin help."""
         if command:
             key = command.strip().lower().removeprefix(config.PREFIX.lower())
-            entry = PUBLIC_MAP.get(key)
+            entry = ALL_PUBLIC.get(key)
             if not entry:
-                await ctx.send(
-                    embed=discord.Embed(
-                        description=f"No public/admin command named `{command}`. Restricted tools are in `f.sudohelp`.",
-                        color=config.COLOR_ERR,
-                    )
-                )
+                await ctx.send(f"No public command named `{command}`.")
                 return
-            await ctx.send(embed=self._detail_embed(entry))
+            _name, usage, description = entry
+            embed = discord.Embed(title=usage, description=description, color=config.COLOR_WAIT)
+            await ctx.send(embed=embed)
             return
-        await ctx.send(embed=self._overview_embed(PUBLIC_COMMANDS))
+        await ctx.send(embed=_page_embed(0), view=HelpView())
 
     @commands.command(name="sudohelp", aliases=["ownerhelp", "modhelp"])
     async def sudohelp(self, ctx: commands.Context, *, command: Optional[str] = None) -> None:
-        """Show restricted owner/trusted-mod help."""
         if not await self._can_use_sudohelp(ctx):
             await ctx.send("You do not have permission to view restricted commands.")
             return
         if command:
             key = command.strip().lower().removeprefix(config.PREFIX.lower())
-            entry = SUDO_MAP.get(key)
+            entry = ALL_SUDO.get(key)
             if not entry:
                 await ctx.send(f"No restricted command named `{command}`.")
                 return
-            await ctx.send(embed=self._detail_embed(entry))
+            _name, usage, description = entry
+            await ctx.send(embed=discord.Embed(title=usage, description=description, color=config.COLOR_WAIT))
             return
-        await ctx.send(embed=self._overview_embed(SUDO_COMMANDS, sudo=True))
+        embed = discord.Embed(
+            title="Fliphone Restricted Tools",
+            description=_command_lines(SUDO_COMMANDS),
+            color=config.COLOR_WAIT,
+        )
+        embed.set_footer(text=config.FOOTER)
+        await ctx.send(embed=embed)
 
 
-async def setup(bot):
+async def setup(bot) -> None:
     await bot.add_cog(Help(bot))

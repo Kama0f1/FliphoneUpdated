@@ -4,22 +4,22 @@
 
 [![Discord](https://img.shields.io/badge/Support_Server-5865F2?style=flat&logo=discord&logoColor=white)](https://discord.gg/t3KHGqPuEP)
 [![top.gg](https://img.shields.io/badge/Vote_on_top.gg-FF3366?style=flat)](https://top.gg/bot/1489342959974486158/vote)
-[![Privacy Policy](https://img.shields.io/badge/Privacy_Policy-30363d?style=flat)](https://YOUR_DOMAIN/privacy.html)
+[![Privacy Policy](https://img.shields.io/badge/Privacy_Policy-30363d?style=flat)](https://gist.github.com/Kama0f1/431f01bbbf1ae6243505778376ba0fb3)
 
 ---
 
 ## What is Fliphone?
 
-Fliphone connects your Discord server's designated channel with a random stranger's server for a real-time, anonymous conversation — like a phone call between two servers. It also supports **group rooms** with up to 6 servers chatting at once.
+Fliphone connects Discord servers for real-time conversations. It supports 1:1 calls and **group rooms** with up to 5 servers chatting at once.
 
-Messages are relayed in real time. Fliphone **never stores message content.**
+Messages are relayed in real time. A short in-memory rolling excerpt is kept temporarily so users can report unsafe conversations; see the Privacy Policy for exact retention.
 
 ---
 
 ## Features
 
 - **1-on-1 calls** — matched instantly when someone is waiting, or queued for up to 10 minutes
-- **Group rooms** — up to 6 servers in one room, identified by NATO station names
+- **Group rooms** — up to 5 servers in one room, identified by station names
 - **Webhook relay** — messages appear with the sender's filtered display name and global Discord avatar
 - **Anonymous mode** — senders appear as *Stranger [NATO word]* with a robot avatar
 - **GIF moderation** — built-in report system with blacklist/whitelist management
@@ -274,7 +274,6 @@ Enable these in the [Discord Developer Portal](https://discord.com/developers/ap
 | `user_chat_stats` | Global user XP, chat count, and ranking data |
 | `server_chat_stats` | Per-server user XP and leaderboard data |
 | `gif_url_list` | Blacklisted and whitelisted GIF URLs |
-| `gif_mode_settings` | Per-server GIF mode (enabled/limited/disabled) |
 | `rooms` | Group room sessions |
 | `room_members` | Servers currently in a group room |
 | `notify_subscribers` | Users opted into queue notifications |
@@ -284,10 +283,10 @@ Enable these in the [Discord Developer Portal](https://discord.com/developers/ap
 
 ## Privacy & Terms
 
-- [Privacy Policy](https://YOUR_DOMAIN/privacy.html)
-- [Terms of Service](https://YOUR_DOMAIN/tos.html)
+- [Privacy Policy](https://gist.github.com/Kama0f1/431f01bbbf1ae6243505778376ba0fb3)
+- [Terms of Service](https://gist.github.com/Kama0f1/085bf38fb03e3c84d99f2ff9afc410af)
 
-Fliphone **does not store message content.** Only the metadata listed in the Privacy Policy is retained.
+Ordinary message content is not stored in PostgreSQL or weekly backups. Temporary report excerpts are handled as described in the Privacy Policy.
 
 ---
 

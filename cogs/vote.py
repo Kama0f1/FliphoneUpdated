@@ -66,5 +66,10 @@ class Vote(commands.Cog):
     async def _before_loop(self) -> None:
         await self.bot.wait_until_ready()
 
+    @commands.hybrid_command(name="vote")
+    async def vote(self, ctx: commands.Context) -> None:
+        """Show the Fliphone top.gg voting link."""
+        await ctx.send(f"Vote for Fliphone on top.gg: {config.TOPGG_URL}")
+
 async def setup(bot) -> None:
     await bot.add_cog(Vote(bot))

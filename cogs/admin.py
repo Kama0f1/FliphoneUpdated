@@ -290,6 +290,8 @@ class Admin(commands.Cog, name="Admin"):
                 "Embed Links": perms.embed_links,
                 "Read Message History": perms.read_message_history,
                 "Manage Webhooks": perms.manage_webhooks,
+                "Attach Files": perms.attach_files,
+                "Add Reactions": perms.add_reactions,
             }
             missing = [name for name, has_perm in required.items() if not has_perm]
             if missing:
@@ -439,6 +441,11 @@ class Admin(commands.Cog, name="Admin"):
             value="Users can run `f.call` in any text channel where Fliphone can view, send messages, and manage webhooks.",
             inline=False,
         )
+        embed.add_field(
+            name="Policies",
+            value=f"[Privacy Policy]({config.PRIVACY_URL}) • [Terms of Service]({config.TOS_URL})",
+            inline=False,
+        )
         embed.set_footer(text=config.FOOTER)
         return embed
 
@@ -501,13 +508,17 @@ class Admin(commands.Cog, name="Admin"):
             await ctx.send("❌ Only the bot owner and trusted mods can use this command.")
             return
         try:
-            ping_started = time.perf_counter()
-            ok = await self.db.ping()
-            ping_ms = int((time.perf_counter() - ping_started) * 1000)
-            counts_started = time.perf_counter()
-            counts = await self.db.table_counts()
-            counts_ms = int((time.perf_counter() - counts_started) * 1000)
-            latency_ms = ping_ms + counts_ms
+            async def timed(operation):
+                started = time.perf_counter()
+                result = await operation
+                return result, int((time.perf_counter() - started) * 1000)
+
+            total_started = time.perf_counter()
+            (ok, ping_ms), (counts, counts_ms) = await asyncio.gather(
+                timed(self.db.ping()),
+                timed(self.db.table_counts()),
+            )
+            latency_ms = int((time.perf_counter() - total_started) * 1000)
         except Exception as exc:
             embed = discord.Embed(
                 title="Database Status",
@@ -558,6 +569,19 @@ class Admin(commands.Cog, name="Admin"):
     @commands.has_permissions(manage_channels=True)
     async def teardown(self, ctx: commands.Context) -> None:
         """Completely remove Fliphone state so the next f.setup starts clean."""
+        await ctx.send("Type `confirm` within 20 seconds to remove all Fliphone setup for this server.")
+        try:
+            confirmation = await self.bot.wait_for(
+                "message",
+                timeout=20,
+                check=lambda message: message.author == ctx.author and message.channel == ctx.channel,
+            )
+        except asyncio.TimeoutError:
+            await ctx.send("Teardown cancelled.")
+            return
+        if confirmation.content.strip().lower() != "confirm":
+            await ctx.send("Teardown cancelled.")
+            return
         lock = self._setup_locks.setdefault(ctx.guild.id, asyncio.Lock())
         async with lock:
             guild_cfg = await self.db.get_guild_config(ctx.guild.id)
@@ -683,12 +707,12 @@ class Admin(commands.Cog, name="Admin"):
             await ctx.send("❌ Phonebooth isn't configured. Run `f.setup` first.")
             return
 
-        conn = await self.db.get_connection(guild_cfg["channel_id"])
+        conn = await self.db.get_connection(ctx.channel.id)
         if not conn:
             await ctx.send("❌ No active call to disconnect.")
             return
 
-        ch_id     = guild_cfg["channel_id"]
+        ch_id     = ctx.channel.id
         other_cid = conn["channel_b"] if ch_id == conn["channel_a"] else conn["channel_a"]
         await self.db.remove_connection(conn["id"], ended_by=ctx.author.id)
         pb_cog = self.bot.get_cog("Phonebooth")

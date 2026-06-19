@@ -9,8 +9,8 @@ f.resolvereport <id>        - Mark a report as resolved [owner + trusted mods]
 
 How it works
 ------------
-During relay, the bot maintains a rolling log of the last 50 messages per call,
-storing { user_id, username, guild_id, guild_name, timestamp } for each.
+During relay, the bot maintains an in-memory rolling log of the last 50 messages
+per call, including a content excerpt used only when a report is submitted.
 This works for both 1-on-1 calls and group rooms.
 
 When a report is submitted:
@@ -60,9 +60,10 @@ class ReportModal(discord.ui.Modal, title="Report a Call"):
         max_length=500,
     )
 
-    def __init__(self, cog: "Report") -> None:
+    def __init__(self, cog: "Report", station: Optional[str] = None) -> None:
         super().__init__()
         self.cog = cog
+        self.station = station
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
@@ -74,6 +75,7 @@ class ReportModal(discord.ui.Modal, title="Report a Call"):
             reason=self.reason.value.strip(),
             media_url=self.media_url.value.strip() or None,
             attachments=[],
+            station=self.station,
         )
 
 
@@ -157,6 +159,7 @@ class Report(commands.Cog):
         username:     str,
         guild_id:     int,
         guild_name:   str,
+        content:      str = "",
     ) -> None:
         """
         Store a sender snapshot in the rolling log for this connection.
@@ -170,6 +173,7 @@ class Report(commands.Cog):
             "guild_id":     guild_id,
             "guild_name":   guild_name,
             "timestamp":    datetime.utcnow().isoformat(timespec="seconds"),
+            "content":      content[:500],
         })
 
     def clear_log(self, conn_id: int) -> None:
@@ -181,10 +185,14 @@ class Report(commands.Cog):
         log = self._message_log.pop(conn_id, None)
         if log:
             self._last_logs[conn_id] = list(log)
+            loop = asyncio.get_running_loop()
+            loop.call_later(30 * 60, self._last_logs.pop, conn_id, None)
 
     # ── Find the call to report against ──────────────────────────────────────
 
-    async def _get_reportable_call(self, guild_id: int, channel_id: int) -> Optional[dict]:
+    async def _get_reportable_call(
+        self, guild_id: int, channel_id: int, station: Optional[str] = None
+    ) -> Optional[dict]:
         """
         Returns a dict with other_guild_id, started_at, ended_at, active, conn_id.
         Checks active connection first, then last_calls cache, then call_history DB.
@@ -199,6 +207,24 @@ class Report(commands.Cog):
                 "ended_at":       None,
                 "active":         True,
                 "conn_id":        conn["id"],
+            }
+
+        room_member = await self.db.get_room_member(channel_id)
+        if room_member:
+            if not station:
+                return {"needs_station": True}
+            members = await self.db.get_room_members(room_member["room_id"])
+            wanted = station.strip().capitalize()
+            target = next((item for item in members if item["station"] == wanted), None)
+            if not target or target["channel_id"] == channel_id:
+                return {"invalid_station": True}
+            room = await self.db.get_room_by_id(room_member["room_id"])
+            return {
+                "other_guild_id": target["guild_id"],
+                "started_at": room["created_at"] if room else None,
+                "ended_at": None,
+                "active": True,
+                "conn_id": -int(room_member["room_id"]),
             }
 
         # 2. In-memory cache — survives skips and instant hangups
@@ -250,9 +276,16 @@ class Report(commands.Cog):
         reason:      str,
         media_url:   Optional[str],
         attachments: list[discord.Attachment],
+        station: Optional[str] = None,
     ) -> None:
 
-        call = await self._get_reportable_call(guild.id, channel_id)
+        call = await self._get_reportable_call(guild.id, channel_id, station)
+        if call and call.get("needs_station"):
+            await interaction.followup.send("Specify who to report with `f.report <station>`.", ephemeral=True)
+            return
+        if call and call.get("invalid_station"):
+            await interaction.followup.send("That station is not in this room.", ephemeral=True)
+            return
         if not call:
             await interaction.followup.send(
                 embed=discord.Embed(
@@ -360,6 +393,21 @@ class Report(commands.Cog):
                 inline=False,
             )
 
+        raw_log = self._message_log.get(call.get("conn_id")) or self._last_logs.get(
+            call.get("conn_id"), []
+        )
+        relevant = [entry for entry in raw_log if entry["guild_id"] != guild.id and entry.get("content")]
+        if relevant:
+            excerpt = "\n".join(
+                f"[{entry['timestamp'][11:19]}] {entry['username']}: {entry['content']}"
+                for entry in relevant[-20:]
+            )
+            log_embed.add_field(
+                name="Recent Conversation Excerpt",
+                value=f"```\n{excerpt[:950]}\n```",
+                inline=False,
+            )
+
         if media_links:
             log_embed.add_field(
                 name="Evidence",
@@ -386,8 +434,8 @@ class Report(commands.Cog):
 
     @commands.hybrid_command(name="report")
     @commands.guild_only()
-    @commands.cooldown(1, 60, commands.BucketType.user)
-    async def report(self, ctx: commands.Context) -> None:
+    @commands.cooldown(1, 30, commands.BucketType.user)
+    async def report(self, ctx: commands.Context, station: Optional[str] = None) -> None:
         """Report the server you are currently in a call with, or your most recent call."""
         cfg = await self.db.get_guild_config(ctx.guild.id)
         if not cfg:
@@ -401,7 +449,7 @@ class Report(commands.Cog):
 
         # Slash — open modal
         if ctx.interaction:
-            await ctx.interaction.response.send_modal(ReportModal(self))
+            await ctx.interaction.response.send_modal(ReportModal(self, station))
             return
 
         # Prefix — collect reason
@@ -468,6 +516,7 @@ class Report(commands.Cog):
             reason=reason,
             media_url=media_url,
             attachments=attachments,
+            station=station,
         )
 
     # ── f.userreports ─────────────────────────────────────────────────────────
@@ -566,7 +615,7 @@ class Report(commands.Cog):
         if isinstance(error, commands.CommandOnCooldown):
             await ctx.send(
                 embed=discord.Embed(
-                    description=f"⏳ You can only submit one report per minute. Try again in **{error.retry_after:.0f}s**.",
+                    description=f"⏳ You can submit one report every 30 seconds. Try again in **{error.retry_after:.0f}s**.",
                     color=config.COLOR_WARN,
                 )
             )

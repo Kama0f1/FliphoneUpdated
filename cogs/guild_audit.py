@@ -1,4 +1,4 @@
-"""Owner-only commands for auditing guild membership."""
+"""Owner-only commands for auditing server membership."""
 
 from __future__ import annotations
 
@@ -12,10 +12,10 @@ class GuildAudit(commands.Cog, name="GuildAudit"):
     def __init__(self, bot) -> None:
         self.bot = bot
 
-    @commands.command(name="guilds", aliases=["servers", "serverlist"])
+    @commands.command(name="servers", aliases=["serverlist"], hidden=True)
     @commands.is_owner()
-    async def guilds(self, ctx: commands.Context) -> None:
-        """List all guilds the bot is currently in (owner only)."""
+    async def servers(self, ctx: commands.Context) -> None:
+        """List all servers the bot is currently in (owner only)."""
         guilds = sorted(
             self.bot.guilds,
             key=lambda guild: guild.member_count or 0,
@@ -30,8 +30,8 @@ class GuildAudit(commands.Cog, name="GuildAudit"):
                 f"{index}. {guild.name} | id={guild.id} | owner={owner_id} | members={members}"
             )
 
-        summary = f"Total guilds: {len(guilds)}"
-        body = "\n".join(lines) if lines else "No guilds found."
+        summary = f"Total servers: {len(guilds)}"
+        body = "\n".join(lines) if lines else "No servers found."
         content = f"{summary}\n\n{body}"
 
         if len(content) <= 1900:
@@ -42,26 +42,26 @@ class GuildAudit(commands.Cog, name="GuildAudit"):
         data = io.BytesIO(content.encode("utf-8"))
         await ctx.send(
             summary,
-            file=discord.File(data, filename="guild_audit.txt"),
+            file=discord.File(data, filename="server_audit.txt"),
         )
 
-    @commands.command(name="leaveguild", aliases=["leaveserver"])
+    @commands.command(name="leaveserver", hidden=True)
     @commands.is_owner()
-    async def leaveguild(self, ctx: commands.Context, guild_id: int) -> None:
-        """Force the bot to leave a guild by ID (owner only)."""
-        guild = self.bot.get_guild(guild_id)
+    async def leaveserver(self, ctx: commands.Context, server_id: int) -> None:
+        """Force the bot to leave a server by ID (owner only)."""
+        guild = self.bot.get_guild(server_id)
         if guild is None:
-            await ctx.send(f"I am not in guild ID {guild_id}.")
+            await ctx.send(f"I am not in server ID {server_id}.")
             return
 
         guild_name = guild.name
         try:
             await guild.leave()
         except discord.HTTPException as exc:
-            await ctx.send(f"Failed to leave {guild_name} ({guild_id}): {exc}")
+            await ctx.send(f"Failed to leave {guild_name} ({server_id}): {exc}")
             return
 
-        await ctx.send(f"Left guild: {guild_name} ({guild_id})")
+        await ctx.send(f"Left server: {guild_name} ({server_id})")
 
 
 async def setup(bot) -> None:

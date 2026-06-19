@@ -3,7 +3,7 @@ cogs/room.py – Multi-server group room feature for Fliphone.
 
 Commands
 --------
-f.room / f.r           – Join a group room of up to 6 servers
+f.room / f.r           – Join a group room of up to 5 servers
 f.roomleave / f.rl     – Leave the current room
 f.roomskip / f.rs      – Leave and immediately re-queue for a new room
 f.roomstatus / f.rst   – Show current room info
@@ -35,14 +35,21 @@ from discord.ext import commands
 import config
 from database import Database
 from filter import filter_message
+from relay_policy import (
+    contains_custom_emoji,
+    extract_urls,
+    is_direct_gif_url,
+    is_local_only,
+    is_provider_gif,
+)
 # GifReportView lives in phonebooth; import lazily via bot.get_cog to avoid circular imports.
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 # Station names used to identify servers — never their real names.
-STATION_NAMES = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot"]
-ROOM_MAX_SIZE = 6
-ROOM_INACTIVITY_MINUTES = 15        # per-member idle → auto-removed
+STATION_NAMES = ["Alpha", "Bravo", "Charlie", "Delta", "Echo"]
+ROOM_MAX_SIZE = 5
+ROOM_INACTIVITY_MINUTES = 10        # no relayed text/GIF → close the room
 ROOM_QUEUE_TIMEOUT_MINUTES = 10     # waiting room dissolves if nobody joins
 
 # Rate limiting — intentionally lax (people type fast).
@@ -101,7 +108,7 @@ def _anon_identity(seed: int) -> tuple[str, str]:
 def _get_avatar_url(member: discord.Member | discord.User) -> str:
     asset = member.avatar or member.default_avatar
     try:
-        return str(asset.with_static_format("png").with_size(256).url)
+        return str(asset.with_size(256).url)
     except Exception:
         try:
             return str(asset.url)
@@ -275,7 +282,7 @@ class VoteKickView(discord.ui.View):
 # ── Room cog ──────────────────────────────────────────────────────────────────
 
 class Room(commands.Cog):
-    """Group room commands — up to 6 servers talking together."""
+    """Group room commands — up to 5 servers talking together."""
 
     def __init__(self, bot) -> None:
         self.bot = bot
@@ -285,7 +292,7 @@ class Room(commands.Cog):
         self._msg_times:   dict[int, deque]   = {}
         # In-memory warn counts (reset when member leaves)
         self._warn_counts: dict[int, int]      = {}
-        # Inactivity tasks per room-member channel
+        # Whole-room inactivity tasks, keyed by room ID.
         self._inactivity_tasks: dict[int, asyncio.Task] = {}
         # Waiting-room timeout tasks per room_id
         self._waiting_tasks:    dict[int, asyncio.Task] = {}
@@ -294,6 +301,13 @@ class Room(commands.Cog):
         # Active vote-kicks: room_id → VoteKickState
         self._active_votekicks: dict[int, VoteKickState] = {}
         self._broken_webhook_notified: set[int] = set()
+        self._reaction_routes: dict[tuple[int, int], list[tuple[int, int]]] = {}
+        self._reaction_times: dict[int, deque] = {}
+        self._relay_locks: dict[int, asyncio.Lock] = {}
+        self._relay_context_by_channel: dict[
+            int, tuple[dict, dict, list[dict]]
+        ] = {}
+        self._relay_context_miss_until: dict[int, float] = {}
         self._recovery_task: asyncio.Task | None = None
 
     async def cog_load(self) -> None:
@@ -306,6 +320,51 @@ class Room(commands.Cog):
             t.cancel()
         for t in self._waiting_tasks.values():
             t.cancel()
+
+    def _cache_relay_context(self, room: dict, members: list[dict]) -> None:
+        for member in members:
+            channel_id = int(member["channel_id"])
+            self._relay_context_miss_until.pop(channel_id, None)
+            self._relay_context_by_channel[channel_id] = (
+                member,
+                room,
+                members,
+            )
+
+    def _invalidate_relay_context(
+        self, *, room_id: Optional[int] = None, channel_id: Optional[int] = None
+    ) -> None:
+        if room_id is None and channel_id is not None:
+            cached = self._relay_context_by_channel.get(int(channel_id))
+            if cached:
+                room_id = int(cached[1]["id"])
+        if room_id is not None:
+            stale = [
+                cid
+                for cid, (_, room, _) in self._relay_context_by_channel.items()
+                if int(room["id"]) == int(room_id)
+            ]
+            for cid in stale:
+                self._relay_context_by_channel.pop(cid, None)
+        elif channel_id is not None:
+            self._relay_context_by_channel.pop(int(channel_id), None)
+        if channel_id is not None:
+            self._relay_context_miss_until.pop(int(channel_id), None)
+
+    async def _get_relay_context(
+        self, channel_id: int
+    ) -> tuple[Optional[dict], Optional[dict], list[dict]]:
+        cached = self._relay_context_by_channel.get(int(channel_id))
+        if cached:
+            return cached
+        if self._relay_context_miss_until.get(int(channel_id), 0.0) > time.monotonic():
+            return None, None, []
+        member, room, members = await self.db.get_room_relay_context(channel_id)
+        if member and room and room["status"] == "active":
+            self._cache_relay_context(room, members)
+        elif not member:
+            self._relay_context_miss_until[int(channel_id)] = time.monotonic() + 30.0
+        return member, room, members
 
     # ── Rate-limit / flood detection ──────────────────────────────────────────
 
@@ -351,17 +410,21 @@ class Room(commands.Cog):
         room_id: int,
         delay_seconds: Optional[float] = None,
     ) -> None:
-        old = self._inactivity_tasks.pop(channel_id, None)
+        old = self._inactivity_tasks.pop(room_id, None)
         if old:
             old.cancel()
-        self._inactivity_tasks[channel_id] = asyncio.create_task(
+        self._inactivity_tasks[room_id] = asyncio.create_task(
             self._inactivity_timer(channel_id, room_id, delay_seconds)
         )
 
     def _cancel_inactivity(self, channel_id: int) -> None:
-        t = self._inactivity_tasks.pop(channel_id, None)
-        if t:
-            t.cancel()
+        # Member removal must not cancel the room-wide activity timer.
+        return
+
+    def _cancel_room_inactivity(self, room_id: int) -> None:
+        task = self._inactivity_tasks.pop(room_id, None)
+        if task:
+            task.cancel()
 
     async def _inactivity_timer(
         self,
@@ -371,18 +434,23 @@ class Room(commands.Cog):
     ) -> None:
         delay = ROOM_INACTIVITY_MINUTES * 60 if delay_seconds is None else max(0.0, delay_seconds)
         await asyncio.sleep(delay)
-        rm = await self.db.get_room_member(channel_id)
-        if not rm or rm["room_id"] != room_id:
+        room = await self.db.get_room_by_id(room_id)
+        if not room or room["status"] != "active":
             return
-        await self._remove_member(
-            channel_id, room_id,
-            broadcast_reason=f"📵 **Station {rm['station']}** was removed for inactivity.",
-            notify_leaver=True,
-            leaver_msg=(
-                f"📵 You were removed from the room due to **{ROOM_INACTIVITY_MINUTES} minutes** "
-                f"of inactivity. Use `f.room` to join a new one!"
-            ),
-        )
+        members = await self.db.get_room_members(room_id)
+        self._invalidate_relay_context(room_id=room_id)
+        for member in members:
+            ch = self.bot.get_channel(member["channel_id"])
+            if ch:
+                try:
+                    await ch.send(
+                        f"📵 Room closed after **{ROOM_INACTIVITY_MINUTES} minutes** without a relayed message."
+                    )
+                except discord.HTTPException:
+                    pass
+            await self.db.remove_room_member(member["channel_id"])
+        await self.db.close_room(room_id)
+        self._cancel_room_inactivity(room_id)
 
     # ── Waiting-room timeout ──────────────────────────────────────────────────
 
@@ -404,6 +472,7 @@ class Room(commands.Cog):
         room = await self.db.get_room_by_id(room_id)
         if not room or room["status"] != "waiting":
             return
+        self._invalidate_relay_context(room_id=room_id)
         for m in await self.db.get_room_members(room_id):
             ch = self.bot.get_channel(m["channel_id"])
             if ch:
@@ -463,29 +532,13 @@ class Room(commands.Cog):
                 await self.db.close_room(room_id)
                 continue
 
-            members = await self.db.get_room_members(room_id)
-            for member in members:
-                channel_id = int(member["channel_id"])
-                last_activity = member.get("last_activity_at") or member.get("joined_at")
-                elapsed = _elapsed_seconds(last_activity)
-                if elapsed >= inactivity_timeout:
-                    await self._remove_member(
-                        channel_id,
-                        room_id,
-                        broadcast_reason=f"📵 **Station {member['station']}** was removed for inactivity.",
-                        notify_leaver=True,
-                        leaver_msg=(
-                            f"📵 You were removed from the room due to **{ROOM_INACTIVITY_MINUTES} minutes** "
-                            "of inactivity. Use `f.room` to join a new one!"
-                        ),
-                    )
-                    current_room = await self.db.get_room_by_id(room_id)
-                    if not current_room or current_room["status"] == "closed":
-                        break
-                    continue
-                if not await self.db.get_room_member(channel_id):
-                    continue
-                self._reset_inactivity(channel_id, room_id, inactivity_timeout - elapsed)
+            if room["status"] == "active":
+                self._cache_relay_context(room, members)
+                elapsed = _elapsed_seconds(room.get("last_activity_at") or room.get("created_at"))
+                first_channel = int(members[0]["channel_id"])
+                self._reset_inactivity(
+                    first_channel, room_id, max(0.0, inactivity_timeout - elapsed)
+                )
 
     # ── Core: remove a member and handle room collapse ────────────────────────
 
@@ -505,6 +558,7 @@ class Room(commands.Cog):
         row = await self.db.remove_room_member(channel_id)
         if not row:
             return
+        self._invalidate_relay_context(room_id=room_id)
 
         self._cancel_inactivity(channel_id)
         self._msg_times.pop(channel_id, None)
@@ -535,13 +589,14 @@ class Room(commands.Cog):
                 self._cancel_inactivity(rm["channel_id"])
             await self.db.close_room(room_id)
             self._cancel_waiting_timeout(room_id)
+            self._cancel_room_inactivity(room_id)
             return
 
         # Broadcast departure to remaining members
         await self._broadcast(
             room_id,
             embed=discord.Embed(
-                description=f"{broadcast_reason} ({len(remaining)}/6 in room)",
+                description=f"{broadcast_reason} ({len(remaining)}/{ROOM_MAX_SIZE} in room)",
                 color=config.COLOR_WARN,
             ),
         )
@@ -573,6 +628,7 @@ class Room(commands.Cog):
 
         # Remove from DB + clean up
         await self.db.remove_room_member(state.target_channel)
+        self._invalidate_relay_context(room_id=state.room_id)
         self._cancel_inactivity(state.target_channel)
         self._msg_times.pop(state.target_channel, None)
         self._warn_counts.pop(state.target_channel, None)
@@ -599,7 +655,7 @@ class Room(commands.Cog):
             embed=discord.Embed(
                 description=(
                     f"🔨 **Station {state.target_station}** was removed by {reason_str}. "
-                    f"({len(remaining)}/6 in room)"
+                    f"({len(remaining)}/{ROOM_MAX_SIZE} in room)"
                 ),
                 color=config.COLOR_ERR,
             ),
@@ -695,7 +751,16 @@ class Room(commands.Cog):
         members: list[dict],
     ) -> None:
         # ── User ban check ────────────────────────────────────────────────────
-        if await self.db.is_user_banned(message.author.id):
+        phonebooth = self.bot.get_cog("Phonebooth")
+        if phonebooth and hasattr(phonebooth, "_get_user_relay_policy"):
+            is_banned, anon = await phonebooth._get_user_relay_policy(message.author.id)
+        else:
+            is_banned, anon = await asyncio.gather(
+                self.db.is_user_banned(message.author.id),
+                self.db.is_user_anonymous(message.author.id),
+            )
+
+        if is_banned:
             try:
                 await message.channel.send(
                     f"🚫 {message.author.mention} You are banned from using Fliphone.",
@@ -745,10 +810,8 @@ class Room(commands.Cog):
             return
 
         # ── Identity ──────────────────────────────────────────────────────────
-        cfg  = await self.db.get_config_by_channel(message.channel.id)
-        anon = cfg.get("anonymous", 0) if cfg else 0
         if anon:
-            seed = room["id"] * 1000 + member["guild_id"]
+            seed = room["id"] * 100000 + message.author.id
             display_name, avatar_url = _anon_identity(seed)
         else:
             author       = message.author
@@ -798,6 +861,18 @@ class Room(commands.Cog):
 
         # ── Content filter ────────────────────────────────────────────────────
         raw = message.content or ""
+
+        if is_local_only(raw):
+            return
+
+        if contains_custom_emoji(raw):
+            try:
+                await message.channel.send(
+                    "Custom server emojis are not relayed. Use regular keyboard emojis instead.",
+                    delete_after=8,
+                )
+            except discord.HTTPException:
+                pass
 
         # ── Anti text-wall: check raw content BEFORE filtering ────────────────
         raw_lines = raw.splitlines()
@@ -849,7 +924,10 @@ class Room(commands.Cog):
 
         # ── Strip non-GIF links ───────────────────────────────────────────────
         # Collect allowed GIF URLs first, then remove all other URLs from content.
-        inline_gif_urls: list[str] = GIF_LINK_PATTERN.findall(content)
+        inline_gif_urls = [
+            url for url in extract_urls(content)
+            if is_provider_gif(url) or is_direct_gif_url(url)
+        ]
         allowed_gif_set: set[str] = set(inline_gif_urls)
 
         def _strip_non_gif_urls(text: str) -> tuple[str, bool]:
@@ -909,21 +987,40 @@ class Room(commands.Cog):
                 all_gif_urls.append(u)
 
         # GIF blacklist check (all in parallel, not one-by-one)
+        gif_status_by_url: dict[str, Optional[str]] = {}
         if all_gif_urls:
             gif_statuses = await asyncio.gather(
                 *[self.db.check_gif_url(u) for u in all_gif_urls],
                 return_exceptions=True,
             )
+            gif_status_by_url = {
+                url: (None if isinstance(status, Exception) else status)
+                for url, status in zip(all_gif_urls, gif_statuses)
+            }
             blocked_count = 0
+            safe_gifs: list[str] = []
             for gif_url, status in zip(all_gif_urls, gif_statuses):
                 if status == "blacklist":
                     content = content.replace(gif_url, "")
-                    all_gif_urls.remove(gif_url)
                     blocked_count += 1
+                elif is_provider_gif(gif_url) or status == "whitelist":
+                    safe_gifs.append(gif_url)
+                else:
+                    content = content.replace(gif_url, "")
+            unapproved = len(all_gif_urls) - blocked_count - len(safe_gifs)
+            all_gif_urls = safe_gifs
             if blocked_count > 0:
                 try:
                     await message.channel.send(
                         f"🚫 {message.author.mention} {blocked_count} blocked GIF(s) were removed.",
+                        delete_after=8,
+                    )
+                except discord.HTTPException:
+                    pass
+            if unapproved:
+                try:
+                    await message.channel.send(
+                        "That GIF source is not approved. Run `f.addgif`, then send it again within 60 seconds for review.",
                         delete_after=8,
                     )
                 except discord.HTTPException:
@@ -933,51 +1030,38 @@ class Room(commands.Cog):
             return
 
         # ── Counters + inactivity reset ───────────────────────────────────────
-        await self.db.increment_room_msg_count(room["id"])
-        await self.db.increment_room_member_msg_count(message.channel.id)
+        asyncio.create_task(self.db.increment_room_msg_count(room["id"]))
+        asyncio.create_task(self.db.increment_room_member_msg_count(message.channel.id))
         self._reset_inactivity(message.channel.id, room["id"])
+        report_cog = self.bot.get_cog("Report")
+        if report_cog:
+            report_cog.record_message(
+                conn_id=-int(room["id"]),
+                user_id=message.author.id,
+                username=str(message.author),
+                guild_id=message.guild.id,
+                guild_name=message.guild.name,
+                content=content.strip(),
+            )
+        asyncio.create_task(
+            self.db.add_chat_xp(message.author.id, message.guild.id, random.randint(12, 22), 60)
+        )
 
         # ── Resolve GifReportView once for the whole relay ───────────────────
         import sys as _sys
         _pb_mod = _sys.modules.get("cogs.phonebooth")
         GifReportView = getattr(_pb_mod, "GifReportView", None) if _pb_mod else None
 
-        # ── Pre-fetch all GIF modes for all recipients in parallel ────────────
         members_without_self = [m for m in members if m["channel_id"] != message.channel.id]
-        if members_without_self:
-            gif_modes_list = await asyncio.gather(
-                *[self.db.get_gif_mode(m["guild_id"]) for m in members_without_self],
-                return_exceptions=True,
-            )
-            members_gif_modes = {
-                m["guild_id"]: (gif_modes_list[i] or "").lower()
-                for i, m in enumerate(members_without_self)
-            }
-        else:
-            members_gif_modes = {}
+        message_copies: list[tuple[int, int]] = [(message.channel.id, message.id)]
 
         # ── Relay to every other member ───────────────────────────────────────
         for other in members_without_self:
             wh_url = other.get("webhook_url")
             other_ch = self.bot.get_channel(other["channel_id"])
 
-            # Apply GIF mode per recipient server so each station receives
-            # content filtered to its own policy.
             recipient_content = content
             recipient_gif_urls = list(all_gif_urls)
-            recipient_gif_mode = members_gif_modes.get(other["guild_id"], "").lower()
-            if recipient_gif_mode == "disabled":
-                for u in recipient_gif_urls:
-                    recipient_content = recipient_content.replace(u, "")
-                recipient_gif_urls = []
-            elif recipient_gif_mode == "limited":
-                safe_urls = [
-                    u for u in recipient_gif_urls
-                    if "tenor.com" in u.lower() or "giphy.com" in u.lower() or "klipy.com" in u.lower()
-                ]
-                for u in [u for u in recipient_gif_urls if u not in safe_urls]:
-                    recipient_content = recipient_content.replace(u, "")
-                recipient_gif_urls = safe_urls
 
             recipient_text_content = recipient_content.strip() or None
             recipient_reply_embed = reply_embed
@@ -1019,7 +1103,7 @@ class Room(commands.Cog):
                 avatar_url,
                 send_files,
                 embed=recipient_reply_embed,
-                wait=bool(recipient_gif_urls),
+                wait=True,
                 silent=bool(recipient_gif_urls),
             )
             if not wh_msg and isinstance(other_ch, discord.TextChannel):
@@ -1035,7 +1119,7 @@ class Room(commands.Cog):
                         avatar_url,
                         send_files,
                         embed=recipient_reply_embed,
-                        wait=bool(recipient_gif_urls),
+                        wait=True,
                         silent=bool(recipient_gif_urls),
                     )
             if not wh_msg:
@@ -1052,17 +1136,14 @@ class Room(commands.Cog):
             self._broken_webhook_notified.discard(other["channel_id"])
             if isinstance(wh_msg, discord.WebhookMessage):
                 sent_msg_id = wh_msg.id
+                message_copies.append((other["channel_id"], wh_msg.id))
 
             # ── GIF report cards (batched checks, not one-by-one) ──────────────
             if recipient_gif_urls and other_ch:
-                # Check whitelist status for all GIFs in parallel
-                gif_statuses = await asyncio.gather(
-                    *[self.db.check_gif_url(u) for u in recipient_gif_urls],
-                    return_exceptions=True,
-                )
                 # Create report tasks for non-whitelisted GIFs
                 report_tasks = []
-                for gif_url, status in zip(recipient_gif_urls, gif_statuses):
+                for gif_url in recipient_gif_urls:
+                    status = gif_status_by_url.get(gif_url)
                     if status == "whitelist":
                         continue
                     async def _create_report(url=gif_url):
@@ -1072,22 +1153,14 @@ class Room(commands.Cog):
                                 msg_id=sent_msg_id,
                                 channel_id=other["channel_id"],
                                 guild_id=other["guild_id"],
+                                session_type="room",
+                                session_id=room["id"],
                             )
-                            report_embed = discord.Embed(
-                                title="🚩 GIF Safety Check",
-                                description=(
-                                    "A GIF was sent in this room.\n"
-                                    "If it contains inappropriate content, tap the button.\n"
-                                    "It will be **immediately removed** and flagged for review.\n"
-                                    "*(Verified safe GIFs cannot be reported.)*"
-                                ),
-                                color=0x2b2d31,
-                            )
-                            report_embed.set_footer(text=f"Report #{report_id} • {config.FOOTER}")
                             if GifReportView:
-                                await other_ch.send(embed=report_embed, view=GifReportView())
-                            else:
-                                await other_ch.send(embed=report_embed)
+                                prompt = await other_ch.send(view=GifReportView(), silent=True)
+                                await self.db.set_gif_report_prompt(
+                                    report_id, prompt.id, prompt.channel.id
+                                )
                         except discord.HTTPException:
                             pass
                         except Exception as e:
@@ -1097,27 +1170,76 @@ class Room(commands.Cog):
                 if report_tasks:
                     await asyncio.gather(*report_tasks, return_exceptions=True)
 
+        if len(message_copies) > 1:
+            for copy in message_copies:
+                self._reaction_routes[copy] = [item for item in message_copies if item != copy]
+
+    async def _relay_reaction(self, payload: discord.RawReactionActionEvent, *, remove: bool) -> None:
+        if not self.bot.user or payload.user_id == self.bot.user.id or payload.emoji.id is not None:
+            return
+        routes = self._reaction_routes.get((payload.channel_id, payload.message_id))
+        if not routes:
+            return
+        now = time.monotonic()
+        times = self._reaction_times.setdefault(payload.user_id, deque())
+        while times and now - times[0] > 10:
+            times.popleft()
+        if len(times) >= 5:
+            return
+        times.append(now)
+        for channel_id, message_id in routes:
+            channel = self.bot.get_channel(channel_id)
+            if not channel:
+                continue
+            try:
+                target = await channel.fetch_message(message_id)
+                if remove:
+                    await target.remove_reaction(str(payload.emoji), self.bot.user)
+                else:
+                    await target.add_reaction(str(payload.emoji))
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
+        await self._relay_reaction(payload, remove=False)
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent) -> None:
+        await self._relay_reaction(payload, remove=True)
+
     # ── on_message ────────────────────────────────────────────────────────────
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot or not message.guild:
             return
+        gif_cog = self.bot.get_cog("GifSubmission")
+        if gif_cog and (gif_cog.is_consumed(message.id) or await gif_cog.consume_capture(message)):
+            return
+        if is_local_only(message.content or ""):
+            return
         ctx = await self.bot.get_context(message)
         if ctx.valid:
             return
-        rm = await self.db.get_room_member(message.channel.id)
+        rm, room, members = await self._get_relay_context(message.channel.id)
         if not rm:
             return
-        room = await self.db.get_room_by_id(rm["room_id"])
         if not room or room["status"] != "active":
             return
-        members = await self.db.get_room_members(rm["room_id"])
-        await self._relay_to_room(message, room, rm, members)
+        lock = self._relay_locks.setdefault(int(room["id"]), asyncio.Lock())
+        async with lock:
+            await self._relay_to_room(message, room, rm, members)
 
     # ── Internal join logic (shared by f.room and f.roomskip) ────────────────
 
-    async def _do_join(self, ctx: commands.Context) -> None:
+    async def _do_join(
+        self,
+        ctx: commands.Context,
+        *,
+        excluded_room_id: Optional[int] = None,
+        force_new: bool = False,
+    ) -> None:
         """Core join logic — find or create a room for this channel."""
         if await self.db.is_user_banned(ctx.author.id):
             await ctx.send("🚫 You are banned from using Fliphone.")
@@ -1163,21 +1285,20 @@ class Room(commands.Cog):
             return
 
         # ── Try to slot into an existing room ─────────────────────────────────
-        room = await self.db.get_available_room(ctx.guild.id)
-        if room:
-            used    = await self.db.get_used_stations(room["id"])
-            station = next((s for s in STATION_NAMES if s not in used), None)
-            if station is None:
-                room = None  # race condition — all slots taken; fall through
-
-        if room:
-            await self.db.add_room_member(
-                room_id=room["id"],
+        room = None
+        if not force_new:
+            room = await self.db.claim_room_slot(
                 channel_id=ctx.channel.id,
                 guild_id=ctx.guild.id,
                 webhook_url=wh_url,
-                station=station,
+                station_names=STATION_NAMES,
+                excluded_room_id=excluded_room_id,
             )
+
+        if room:
+            station = room["station"]
+            self._relay_context_miss_until.pop(int(ctx.channel.id), None)
+            self._invalidate_relay_context(room_id=room["id"])
             count = await self.db.get_room_member_count(room["id"])
 
             # Promote waiting → active once a second server joins
@@ -1185,10 +1306,14 @@ class Room(commands.Cog):
                 await self.db.activate_room(room["id"])
                 self._cancel_waiting_timeout(room["id"])
 
+            await self.db.touch_room(room["id"])
             self._reset_inactivity(ctx.channel.id, room["id"])
 
             # Notify every member
             all_members = await self.db.get_room_members(room["id"])
+            if count >= 2:
+                active_room = {**room, "status": "active"}
+                self._cache_relay_context(active_room, all_members)
             for m in all_members:
                 ch = self.bot.get_channel(m["channel_id"])
                 if not ch:
@@ -1220,7 +1345,7 @@ class Room(commands.Cog):
                     else:
                         await ch.send(
                             embed=discord.Embed(
-                                description=f"📡 **Station {station}** has joined the room! ({count}/6)",
+                                description=f"📡 **Station {station}** has joined the room! ({count}/{ROOM_MAX_SIZE})",
                                 color=config.COLOR_OK,
                             )
                         )
@@ -1237,6 +1362,7 @@ class Room(commands.Cog):
             webhook_url=wh_url,
             station="Alpha",
         )
+        self._relay_context_miss_until.pop(int(ctx.channel.id), None)
         self._reset_inactivity(ctx.channel.id, room_id)
         self._start_waiting_timeout(room_id)
 
@@ -1259,8 +1385,15 @@ class Room(commands.Cog):
     @commands.guild_only()
     @commands.cooldown(1, 5, commands.BucketType.channel)
     async def room(self, ctx: commands.Context) -> None:
-        """Join a group room of up to 6 servers."""
+        """Join a group room of up to 5 servers."""
         await self._do_join(ctx)
+
+    @commands.command(name="roomcreate", aliases=["rc"])
+    @commands.guild_only()
+    @commands.cooldown(1, 30, commands.BucketType.channel)
+    async def roomcreate(self, ctx: commands.Context) -> None:
+        """Create a fresh room instead of joining an available one."""
+        await self._do_join(ctx, force_new=True)
 
     # ── f.roomleave ───────────────────────────────────────────────────────────
 
@@ -1301,7 +1434,7 @@ class Room(commands.Cog):
         )
         await ctx.send("⏭️ Skipping to a new room…")
         # Directly invoke the join logic (no cooldown hit since we call internal method)
-        await self._do_join(ctx)
+        await self._do_join(ctx, excluded_room_id=rm["room_id"])
 
     # ── f.roomstatus ─────────────────────────────────────────────────────────
 
@@ -1322,7 +1455,7 @@ class Room(commands.Cog):
         )
         embed = discord.Embed(title="📡 Room Status", color=config.COLOR_OK)
         embed.add_field(name="Your Station", value=f"Station {rm['station']}", inline=True)
-        embed.add_field(name="Servers",      value=f"{len(members)}/6",         inline=True)
+        embed.add_field(name="Servers",      value=f"{len(members)}/{ROOM_MAX_SIZE}", inline=True)
         embed.add_field(name="Status",       value=room["status"].capitalize(),  inline=True)
         embed.add_field(name="Duration",     value=_duration_str(room["created_at"]), inline=True)
         embed.add_field(name="Messages",     value=str(room["msg_count"]),       inline=True)
