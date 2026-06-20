@@ -8,7 +8,7 @@ f.hangup / f.h    – End call or leave queue
 f.skip / f.s      – Hang up and immediately redial
 f.status          – Show current status
 f.block           – Block the server you're talking to
-f.anon / f.mask   – Toggle anonymous mode for YOUR server
+f.anon / f.mask   – Toggle your personal Stranger identity
 f.fr              – Share your username as a friend request card
 """
 
@@ -1529,25 +1529,6 @@ class Phonebooth(commands.Cog):
                     pass
             # Start inactivity timer for this call
             self._reset_inactivity(conn_id, ctx.channel.id, match["channel_id"])
-            # Anon mode notifications
-            caller_cfg  = cfg
-            partner_cfg = await self._get_guild_config_cached(match["guild_id"])
-            caller_anon  = caller_cfg.get("anonymous", 0) if caller_cfg else 0
-            partner_anon = partner_cfg.get("anonymous", 0) if partner_cfg else 0
-            if caller_anon:
-                await ctx.send("🎭 Anonymous mode is enabled — the other server sees you as a Stranger.")
-            if partner_anon and partner_channel:
-                try:
-                    await partner_channel.send("🎭 Anonymous mode is enabled — the other server sees you as a Stranger.")
-                except discord.HTTPException:
-                    pass
-            if partner_anon:
-                await ctx.send("🎭 The other server has anonymous mode enabled — you will see them as a Stranger.")
-            if caller_anon and partner_channel:
-                try:
-                    await partner_channel.send("🎭 The other server has anonymous mode enabled — you will see them as a Stranger.")
-                except discord.HTTPException:
-                    pass
         else:
             current = await self.db.get_connection(ctx.channel.id)
             if current:
@@ -2104,7 +2085,7 @@ class Phonebooth(commands.Cog):
     @commands.hybrid_command(name="anon", aliases=["mask", "anonymous"])
     @commands.guild_only()
     async def anon(self, ctx: commands.Context) -> None:
-        """Toggle anonymous mode for this server. Anyone in the phonebooth channel can use this."""
+        """Toggle your personal Stranger identity."""
         # Check this is a configured phonebooth channel
         cfg, guild_cfg = await asyncio.gather(
             self._get_config_by_channel_cached(ctx.channel.id),
