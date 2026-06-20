@@ -85,27 +85,71 @@ class ReportModal(discord.ui.Modal, title="Report a Call"):
 # ── Cog ───────────────────────────────────────────────────────────────────────
 
 class UserReportSelect(discord.ui.Select):
-    def __init__(self, view: "UserReportPanelView", reports: list[dict]) -> None:
+    def __init__(
+        self,
+        view: "UserReportPanelView",
+        reports: list[dict],
+        selected_report_id: Optional[int] = None,
+    ) -> None:
         self.panel_view = view
         options = []
         for report in reports[:25]:
             label = f"Report #{report['id']}"
             description = (report["reason"] or "")[:90]
-            options.append(discord.SelectOption(label=label, value=str(report["id"]), description=description))
+            options.append(
+                discord.SelectOption(
+                    label=label,
+                    value=str(report["id"]),
+                    description=description,
+                    default=int(report["id"]) == selected_report_id,
+                )
+            )
         super().__init__(placeholder="Choose a call report", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction) -> None:
         self.panel_view.selected_report_id = int(self.values[0])
-        await interaction.response.send_message(f"Selected call report #{self.values[0]}.", ephemeral=True)
+        report = self.panel_view.get_selected_report()
+        if not report:
+            await interaction.response.send_message(
+                "That report is no longer open. Refresh the panel.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.edit_message(
+            embed=self.panel_view.cog._build_userreport_detail_embed(report),
+            view=UserReportPanelView(
+                self.panel_view.cog,
+                self.panel_view.reports,
+                selected_report_id=self.panel_view.selected_report_id,
+            ),
+        )
 
 
 class UserReportPanelView(discord.ui.View):
-    def __init__(self, cog: "Report", reports: list[dict]) -> None:
+    def __init__(
+        self,
+        cog: "Report",
+        reports: list[dict],
+        selected_report_id: Optional[int] = None,
+    ) -> None:
         super().__init__(timeout=300)
         self.cog = cog
-        self.selected_report_id = int(reports[0]["id"]) if reports else None
+        self.reports = reports
+        self.selected_report_id = selected_report_id
         if reports:
-            self.add_item(UserReportSelect(self, reports))
+            self.add_item(UserReportSelect(self, reports, selected_report_id))
+
+    def get_selected_report(self) -> Optional[dict]:
+        if self.selected_report_id is None:
+            return None
+        return next(
+            (
+                report
+                for report in self.reports
+                if int(report["id"]) == self.selected_report_id
+            ),
+            None,
+        )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         admin_cog = interaction.client.get_cog("Admin")
@@ -116,8 +160,28 @@ class UserReportPanelView(discord.ui.View):
 
     async def _refresh(self, interaction: discord.Interaction, message: str | None = None) -> None:
         reports = await self.cog.db.get_open_call_reports()
-        embed = self.cog._build_userreports_embed(reports)
-        view = UserReportPanelView(self.cog, reports) if reports else None
+        selected = next(
+            (
+                report
+                for report in reports
+                if int(report["id"]) == self.selected_report_id
+            ),
+            None,
+        )
+        embed = (
+            self.cog._build_userreport_detail_embed(selected)
+            if selected
+            else self.cog._build_userreports_embed(reports)
+        )
+        view = (
+            UserReportPanelView(
+                self.cog,
+                reports,
+                selected_report_id=int(selected["id"]) if selected else None,
+            )
+            if reports
+            else None
+        )
         if interaction.response.is_done():
             await interaction.edit_original_response(embed=embed, view=view)
         else:
@@ -582,6 +646,53 @@ class Report(commands.Cog):
         await ctx.send(embed=embed)
 
     # ── f.resolvereport ───────────────────────────────────────────────────────
+
+    def _build_userreport_detail_embed(self, report: dict) -> discord.Embed:
+        def _timestamp(value: Optional[str], fallback: str) -> str:
+            return str(value)[:19] if value else fallback
+
+        reported_guild = self.bot.get_guild(report["reported_guild_id"])
+        reporter_guild = self.bot.get_guild(report["reporter_guild_id"])
+        reported_name = reported_guild.name if reported_guild else "Unknown Server"
+        reporter_name = reporter_guild.name if reporter_guild else "Unknown Server"
+
+        embed = discord.Embed(
+            title=f"Call Report #{report['id']}",
+            description=(report.get("reason") or "No reason provided.")[:4096],
+            color=config.COLOR_WARN,
+        )
+        embed.add_field(
+            name="Reported Server",
+            value=f"{reported_name}\n`{report['reported_guild_id']}`",
+            inline=True,
+        )
+        embed.add_field(
+            name="Reported By",
+            value=f"{reporter_name}\n`{report['reporter_guild_id']}`",
+            inline=True,
+        )
+        embed.add_field(
+            name="Reporter",
+            value=f"<@{report['reporter_user_id']}>\n`{report['reporter_user_id']}`",
+            inline=True,
+        )
+        embed.add_field(
+            name="Call Started",
+            value=_timestamp(report.get("call_started_at"), "Unknown"),
+            inline=True,
+        )
+        embed.add_field(
+            name="Call Ended",
+            value=_timestamp(report.get("call_ended_at"), "Active when reported"),
+            inline=True,
+        )
+        embed.add_field(
+            name="Submitted",
+            value=_timestamp(report.get("created_at"), "Unknown"),
+            inline=True,
+        )
+        embed.set_footer(text="Use Resolve to close this report, or choose another report above.")
+        return embed
 
     def _build_userreports_embed(self, reports: list[dict]) -> discord.Embed:
         if not reports:
