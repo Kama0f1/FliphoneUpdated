@@ -1046,11 +1046,23 @@ class Phonebooth(commands.Cog):
         elif channel.id == conn["channel_b"]:
             old_webhook_url = conn.get("webhook_b")
         self._invalidate_webhook_url(old_webhook_url)
-        webhook_url, _ = await self.ensure_relay_webhook(
-            channel,
-            force_refresh=True,
-        )
+
+        # A failed webhook can still appear in channel.webhooks(), so merely
+        # refreshing it may return the same unusable token. Rebuild it exactly
+        # as f.repair does, but without tearing down the active call.
+        webhook_url = None
+        repair_issues: list[str] = []
+        for attempt in range(2):
+            webhook_url, repair_issues = await self.rebuild_relay_webhook(channel)
+            if webhook_url:
+                break
+            if attempt == 0 and not self.relay_permission_issues(channel):
+                await asyncio.sleep(0.5)
         if not webhook_url:
+            print(
+                f"[relay-webhook-repair] channel={channel.id} failed: "
+                f"{', '.join(repair_issues) or 'unknown error'}"
+            )
             return None
 
         await self.db.update_connection_webhook(channel.id, webhook_url)
