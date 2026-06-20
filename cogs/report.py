@@ -199,6 +199,7 @@ class UserReportPanelView(discord.ui.View):
         if not success:
             await self._refresh(interaction, "That report was already resolved or no longer exists.")
             return
+        self.cog._report_session_ids.pop(self.selected_report_id, None)
         await self._refresh(interaction, f"Call report #{self.selected_report_id} resolved.")
 
     @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary)
@@ -216,6 +217,9 @@ class Report(commands.Cog):
 
         # conn_id -> snapshot retained for post-conversation reports
         self._last_logs: dict[int, list] = {}
+
+        # report_id -> active/previous conversation log key (content remains in the log only)
+        self._report_session_ids: dict[int, int] = {}
 
     # ── Called by Phonebooth cog during every relay ───────────────────────────
 
@@ -389,6 +393,8 @@ class Report(commands.Cog):
             call_started_at=call.get("started_at"),
             call_ended_at=call.get("ended_at"),
         )
+        if call.get("conn_id") is not None:
+            self._report_session_ids[int(report_id)] = int(call["conn_id"])
 
         # Confirm to reporter
         confirm_embed = discord.Embed(
@@ -691,8 +697,55 @@ class Report(commands.Cog):
             value=_timestamp(report.get("created_at"), "Unknown"),
             inline=True,
         )
+        excerpt = self._build_panel_excerpt(report)
+        embed.add_field(
+            name="Recent Conversation Excerpt",
+            value=(
+                f"```text\n{excerpt}\n```"
+                if excerpt
+                else "Temporary excerpt unavailable or expired. Check the original report message for attached evidence."
+            ),
+            inline=False,
+        )
         embed.set_footer(text="Use Resolve to close this report, or choose another report above.")
         return embed
+
+    def _get_log_for_report(self, report: dict) -> list[dict]:
+        report_id = int(report["id"])
+        session_id = self._report_session_ids.get(report_id)
+        if session_id is None:
+            return []
+        log = self._message_log.get(session_id) or self._last_logs.get(session_id, [])
+        return list(log)
+
+    def _build_panel_excerpt(self, report: dict) -> str:
+        log = self._get_log_for_report(report)
+        if not log:
+            return ""
+
+        lines: list[str] = []
+        length = 0
+        for entry in reversed(log):
+            content = " ".join(str(entry.get("content") or "").split())
+            if not content:
+                continue
+            content = content.replace("```", "`\u200b``")[:260]
+            username = str(entry.get("username") or "Unknown").replace("```", "`\u200b``")
+            side = (
+                "Reported"
+                if int(entry["guild_id"]) == int(report["reported_guild_id"])
+                else "Reporter"
+            )
+            timestamp = str(entry.get("timestamp") or "")
+            time_label = timestamp[11:19] if len(timestamp) >= 19 else "unknown"
+            line = f"[{time_label}] {side} / {username}: {content}"
+            if length + len(line) + 1 > 970:
+                continue
+            lines.append(line)
+            length += len(line) + 1
+            if len(lines) >= 6:
+                break
+        return "\n".join(reversed(lines))
 
     def _build_userreports_embed(self, reports: list[dict]) -> discord.Embed:
         if not reports:
@@ -737,6 +790,7 @@ class Report(commands.Cog):
             await ctx.send(f"❌ No open report found with ID `{report_id}`.")
             return
 
+        self._report_session_ids.pop(report_id, None)
         await ctx.send(
             embed=discord.Embed(
                 description=f"✅ Report #{report_id} marked as resolved.",
