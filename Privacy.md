@@ -20,9 +20,9 @@ Fliphone is a Discord bot that connects users across servers for 1:1 calls and g
 
 Fliphone relays message content in real time. It does not write ordinary conversation text to PostgreSQL or weekly database backups.
 
-For safety reports, the bot keeps a rolling in-memory buffer of up to the last 50 relayed messages per conversation. Each entry is limited to 500 characters. The buffer is removed 30 minutes after a call ends, when the process restarts, or when it is otherwise cleared.
+For safety reports, the bot keeps a rolling in-memory buffer of up to the last 50 relayed messages per conversation. Each entry is limited to 2,000 characters. The buffer is removed 24 hours after a call or room ends, when the process restarts, or when it is otherwise cleared.
 
-If a user submits a report, up to the last 20 relevant messages may be posted to a private Discord moderation channel for review. That Discord message may remain until moderators delete it. Report metadata and the report reason are stored in the database.
+If a user submits a report, a short preview and a text file containing the captured conversation excerpt may be posted to a private Discord moderation channel for review. The excerpt contains at most the last 50 relayed messages. That Discord message may remain until moderators delete it. Report metadata and the report reason are stored in the database.
 
 Messages beginning with `x ` or `X ` stay in the local Discord channel and are not relayed or added to the report buffer.
 

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import io
 import os
 from datetime import datetime
 from typing import Optional
@@ -40,6 +41,8 @@ REPORT_LOG_CHANNEL_ID = int(os.getenv("USER_REPORT_LOG_CHANNEL_ID", 149720591508
 
 # How many recent messages to keep in the rolling log per call
 MAX_LOG_ENTRIES = 50
+MAX_LOG_CONTENT_CHARS = 2_000
+POST_CONVERSATION_RETENTION_SECONDS = 24 * 60 * 60
 
 
 # ── Report Modal (slash command) ──────────────────────────────────────────────
@@ -147,7 +150,7 @@ class Report(commands.Cog):
         # conn_id -> deque of { user_id, username, guild_id, guild_name, timestamp }
         self._message_log: dict[int, collections.deque] = {}
 
-        # conn_id -> list snapshot kept briefly after a call ends for post-hangup reports
+        # conn_id -> snapshot retained for post-conversation reports
         self._last_logs: dict[int, list] = {}
 
     # ── Called by Phonebooth cog during every relay ───────────────────────────
@@ -173,7 +176,7 @@ class Report(commands.Cog):
             "guild_id":     guild_id,
             "guild_name":   guild_name,
             "timestamp":    datetime.utcnow().isoformat(timespec="seconds"),
-            "content":      content[:500],
+            "content":      content[:MAX_LOG_CONTENT_CHARS],
         })
 
     def clear_log(self, conn_id: int) -> None:
@@ -186,7 +189,12 @@ class Report(commands.Cog):
         if log:
             self._last_logs[conn_id] = list(log)
             loop = asyncio.get_running_loop()
-            loop.call_later(30 * 60, self._last_logs.pop, conn_id, None)
+            loop.call_later(
+                POST_CONVERSATION_RETENTION_SECONDS,
+                self._last_logs.pop,
+                conn_id,
+                None,
+            )
 
     # ── Find the call to report against ──────────────────────────────────────
 
@@ -397,6 +405,7 @@ class Report(commands.Cog):
             call.get("conn_id"), []
         )
         relevant = [entry for entry in raw_log if entry["guild_id"] != guild.id and entry.get("content")]
+        transcript_file = None
         if relevant:
             excerpt = "\n".join(
                 f"[{entry['timestamp'][11:19]}] {entry['username']}: {entry['content']}"
@@ -406,6 +415,21 @@ class Report(commands.Cog):
                 name="Recent Conversation Excerpt",
                 value=f"```\n{excerpt[:950]}\n```",
                 inline=False,
+            )
+
+        captured = [entry for entry in raw_log if entry.get("content")]
+        if captured:
+            transcript = "\n".join(
+                (
+                    f"[{entry['timestamp']}] {entry['username']} "
+                    f"(user {entry['user_id']}; {entry['guild_name']} / "
+                    f"server {entry['guild_id']}): {entry['content']}"
+                )
+                for entry in captured
+            )
+            transcript_file = discord.File(
+                io.BytesIO(transcript.encode("utf-8")),
+                filename=f"report-{report_id}-excerpt.txt",
             )
 
         if media_links:
@@ -426,7 +450,7 @@ class Report(commands.Cog):
         )
 
         try:
-            await log_ch.send(embed=log_embed)
+            await log_ch.send(embed=log_embed, file=transcript_file)
         except discord.HTTPException:
             pass
 

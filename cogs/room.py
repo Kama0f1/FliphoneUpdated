@@ -430,6 +430,13 @@ class Room(commands.Cog):
         if task:
             task.cancel()
 
+    async def _close_room(self, room_id: int) -> None:
+        """Close a room and start the same report-log expiry used by calls."""
+        await self.db.close_room(room_id)
+        report_cog = self.bot.get_cog("Report")
+        if report_cog:
+            report_cog.clear_log(-int(room_id))
+
     async def _inactivity_timer(
         self,
         channel_id: int,
@@ -453,7 +460,7 @@ class Room(commands.Cog):
                 except discord.HTTPException:
                     pass
             await self.db.remove_room_member(member["channel_id"])
-        await self.db.close_room(room_id)
+        await self._close_room(room_id)
         self._cancel_room_inactivity(room_id)
 
     # ── Waiting-room timeout ──────────────────────────────────────────────────
@@ -489,7 +496,7 @@ class Room(commands.Cog):
                     pass
             await self.db.remove_room_member(m["channel_id"])
             self._cancel_inactivity(m["channel_id"])
-        await self.db.close_room(room_id)
+        await self._close_room(room_id)
 
     async def _recover_runtime_state(self) -> None:
         """Resume or expire persisted room timers after a bot restart."""
@@ -507,7 +514,7 @@ class Room(commands.Cog):
             room_id = int(room["id"])
             members = await self.db.get_room_members(room_id)
             if not members:
-                await self.db.close_room(room_id)
+                await self._close_room(room_id)
                 continue
 
             if room["status"] == "waiting":
@@ -533,7 +540,7 @@ class Room(commands.Cog):
                             pass
                     await self.db.remove_room_member(member["channel_id"])
                     self._cancel_inactivity(member["channel_id"])
-                await self.db.close_room(room_id)
+                await self._close_room(room_id)
                 continue
 
             if room["status"] == "active":
@@ -591,7 +598,7 @@ class Room(commands.Cog):
                         pass
                 await self.db.remove_room_member(rm["channel_id"])
                 self._cancel_inactivity(rm["channel_id"])
-            await self.db.close_room(room_id)
+            await self._close_room(room_id)
             self._cancel_waiting_timeout(room_id)
             self._cancel_room_inactivity(room_id)
             return
@@ -651,7 +658,7 @@ class Room(commands.Cog):
                         pass
                 await self.db.remove_room_member(rm["channel_id"])
                 self._cancel_inactivity(rm["channel_id"])
-            await self.db.close_room(state.room_id)
+            await self._close_room(state.room_id)
             return
 
         await self._broadcast(
