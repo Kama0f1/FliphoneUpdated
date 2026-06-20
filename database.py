@@ -1432,6 +1432,12 @@ class Database:
     async def get_room_member(self, channel_id: int) -> Optional[dict]:
         return await self._fetchrow("SELECT * FROM room_members WHERE channel_id = ?", (channel_id,))
 
+    async def get_guild_room_members(self, guild_id: int) -> list[dict]:
+        return await self._fetchall(
+            "SELECT * FROM room_members WHERE guild_id = ? ORDER BY joined_at ASC",
+            (guild_id,),
+        )
+
     async def get_room_members(self, room_id: int) -> list[dict]:
         return await self._fetchall(
             "SELECT * FROM room_members WHERE room_id = ? ORDER BY joined_at ASC",

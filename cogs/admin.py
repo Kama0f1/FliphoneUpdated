@@ -177,6 +177,71 @@ class Admin(commands.Cog, name="Admin"):
         except (discord.Forbidden, discord.HTTPException):
             pass
 
+    async def _active_setup_activity(self, guild_id: int) -> list[str]:
+        connections, queue_entries, room_members = await asyncio.gather(
+            self.db.get_guild_connections(guild_id),
+            self.db.get_guild_queue_entries(guild_id),
+            self.db.get_guild_room_members(guild_id),
+        )
+        activity: list[str] = []
+        if connections:
+            activity.append(f"{len(connections)} active 1:1 call(s)")
+        if queue_entries:
+            activity.append(f"{len(queue_entries)} queue search(es)")
+        if room_members:
+            activity.append(f"{len(room_members)} active room station(s)")
+        return activity
+
+    async def _configured_setup_issues(
+        self,
+        guild: discord.Guild,
+        guild_cfg: dict,
+    ) -> tuple[Optional[discord.TextChannel], list[str]]:
+        channel_id = int(guild_cfg["channel_id"])
+        channel = guild.get_channel(channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            return None, [f"Configured channel `{channel_id}` is missing or inaccessible"]
+
+        pb_cog = self.bot.get_cog("Phonebooth")
+        issues = (
+            pb_cog.relay_permission_issues(channel)
+            if pb_cog and hasattr(pb_cog, "relay_permission_issues")
+            else ["Phonebooth relay is unavailable"]
+        )
+        if issues:
+            return channel, issues
+
+        try:
+            webhooks = await channel.webhooks()
+        except discord.Forbidden:
+            return channel, ["Manage Webhooks is denied in the configured channel or category"]
+        except discord.HTTPException:
+            return channel, ["Discord could not verify the configured channel's webhook"]
+
+        bot_webhook = next(
+            (wh for wh in webhooks if wh.user == self.bot.user and wh.name == "Fliphone"),
+            None,
+        )
+        if bot_webhook is None:
+            if len(webhooks) >= 15:
+                return channel, ["The configured channel has Discord's maximum of 15 webhooks"]
+            return channel, ["The configured channel's Fliphone webhook is missing"]
+        if guild_cfg.get("webhook_url") != bot_webhook.url:
+            return channel, ["The configured channel has a stale stored webhook"]
+        return channel, []
+
+    @staticmethod
+    def _active_setup_embed(activity: list[str]) -> discord.Embed:
+        return discord.Embed(
+            title="Setup Change Blocked",
+            description=(
+                "Fliphone did not reset anything because this server is currently using it:\n"
+                + "\n".join(f"- {item}" for item in activity)
+                + "\n\nEnd or leave that activity first, then run `f.repair` again."
+            ),
+            color=config.COLOR_WARN,
+        )
+
     async def _clear_guild_setup_state(self, guild: discord.Guild, *, notify_partner: bool) -> None:
         """Remove active runtime state and stored setup before a clean rebuild."""
         guild_cfg = await self.db.get_guild_config(guild.id)
@@ -320,7 +385,7 @@ class Admin(commands.Cog, name="Admin"):
                     else:
                         issues.append("No Fliphone webhook found. Run `f.repair`.")
                 except discord.Forbidden:
-                    issues.append("Cannot inspect webhooks. Run `f.setup` to rebuild everything.")
+                    issues.append("Cannot inspect webhooks. Check channel/category permissions, then run `f.repair`.")
                 except discord.HTTPException:
                     issues.append("Discord failed while checking webhooks. Try `f.check` again.")
 
@@ -359,7 +424,7 @@ class Admin(commands.Cog, name="Admin"):
             embed.add_field(
                 name="Next Step",
                 value=(
-                    "Run `f.setup` in the channel you want to use. It will reset and rebuild everything automatically.\n\n"
+                    "Run `f.repair` to rebuild the damaged setup. Active calls, queue searches, and rooms must end first.\n\n"
                     "If it reports missing permissions, re-invite Fliphone first. If the same permission is still "
                     "missing, that channel or its category is explicitly denying it; allow Fliphone there or use "
                     "another channel."
@@ -374,16 +439,6 @@ class Admin(commands.Cog, name="Admin"):
             )
         embed.set_footer(text=config.FOOTER)
         return embed, repair_channel_id if issues else None
-
-    async def _reset_and_setup(
-        self,
-        guild: discord.Guild,
-        user: discord.abc.User,
-        target: discord.TextChannel,
-    ) -> discord.Embed:
-        lock = self._setup_locks.setdefault(guild.id, asyncio.Lock())
-        async with lock:
-            return await self._reset_and_setup_locked(guild, user, target)
 
     async def _reset_and_setup_locked(
         self,
@@ -455,7 +510,12 @@ class Admin(commands.Cog, name="Admin"):
         user: discord.abc.User,
         target: discord.TextChannel,
     ) -> discord.Embed:
-        return await self._reset_and_setup(guild, user, target)
+        lock = self._setup_locks.setdefault(guild.id, asyncio.Lock())
+        async with lock:
+            activity = await self._active_setup_activity(guild.id)
+            if activity:
+                return self._active_setup_embed(activity)
+            return await self._reset_and_setup_locked(guild, user, target)
 
     # ── f.setup ───────────────────────────────────────────────────────────────
 
@@ -463,13 +523,54 @@ class Admin(commands.Cog, name="Admin"):
     @commands.guild_only()
     @commands.has_permissions(manage_channels=True)
     async def setup(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None) -> None:
-        """Reset and fully rebuild Fliphone in the selected channel."""
+        """Configure Fliphone once without resetting a healthy existing setup."""
         target = channel or ctx.channel
         if not isinstance(target, discord.TextChannel):
             await ctx.send("❌ Fliphone setup requires a normal text channel.")
             return
 
-        embed = await self._reset_and_setup(ctx.guild, ctx.author, target)
+        lock = self._setup_locks.setdefault(ctx.guild.id, asyncio.Lock())
+        async with lock:
+            guild_cfg = await self.db.get_guild_config(ctx.guild.id)
+            if guild_cfg:
+                configured_channel, issues = await self._configured_setup_issues(ctx.guild, guild_cfg)
+                if not issues:
+                    channel_label = configured_channel.mention if configured_channel else "the configured channel"
+                    embed = discord.Embed(
+                        title="Fliphone Is Already Ready",
+                        description=(
+                            f"This server already has a healthy setup in {channel_label}. "
+                            "Nothing was reset.\n\n"
+                            "Users can run `f.call` in any text channel where Fliphone has the required permissions. "
+                            "Use `f.check` for diagnostics or `f.repair` only when setup is broken."
+                        ),
+                        color=config.COLOR_OK,
+                    )
+                else:
+                    activity = await self._active_setup_activity(ctx.guild.id)
+                    activity_note = (
+                        "\n\nA reset is currently blocked because this server has:\n"
+                        + "\n".join(f"- {item}" for item in activity)
+                        if activity
+                        else ""
+                    )
+                    embed = discord.Embed(
+                        title="Setup Needs Repair",
+                        description=(
+                            "Fliphone found an existing setup and did not overwrite it.\n\n"
+                            "**Problem:** " + "; ".join(issues)
+                            + activity_note
+                            + "\n\nRun `f.repair` after active calls, queue searches, and rooms have ended. "
+                            "Use `f.repair #channel` if you need to move setup to a different channel."
+                        ),
+                        color=config.COLOR_WARN,
+                    )
+            else:
+                activity = await self._active_setup_activity(ctx.guild.id)
+                if activity:
+                    embed = self._active_setup_embed(activity)
+                else:
+                    embed = await self._reset_and_setup_locked(ctx.guild, ctx.author, target)
         await ctx.send(embed=embed)
 
     # ── f.teardown ────────────────────────────────────────────────────────────
@@ -487,7 +588,7 @@ class Admin(commands.Cog, name="Admin"):
     @commands.guild_only()
     @commands.has_permissions(manage_channels=True)
     async def repair(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None) -> None:
-        """Reset and rebuild setup. Equivalent to f.setup in the configured channel."""
+        """Reset and rebuild a damaged setup when the server is idle."""
         guild_cfg = await self.db.get_guild_config(ctx.guild.id)
         target = channel
         if target is None and guild_cfg:
