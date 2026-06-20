@@ -7,10 +7,15 @@ import io
 import discord
 from discord.ext import commands
 
+import config
+
 
 class GuildAudit(commands.Cog, name="GuildAudit"):
     def __init__(self, bot) -> None:
         self.bot = bot
+
+    async def _is_global_mod(self, ctx: commands.Context) -> bool:
+        return await self.bot.is_owner(ctx.author) or ctx.author.id in config.TRUSTED_MOD_IDS
 
     @commands.command(name="servers", aliases=["serverlist"], hidden=True)
     @commands.is_owner()
@@ -62,6 +67,37 @@ class GuildAudit(commands.Cog, name="GuildAudit"):
             return
 
         await ctx.send(f"Left server: {guild_name} ({server_id})")
+
+    @commands.command(name="serverban", aliases=["banguild"], hidden=True)
+    async def serverban(
+        self, ctx: commands.Context, server_id: int, *, reason: str = "No reason given"
+    ) -> None:
+        """Ban a server from Fliphone and leave it."""
+        if not await self._is_global_mod(ctx):
+            await ctx.send("You do not have permission to ban servers.")
+            return
+        guild = self.bot.get_guild(server_id)
+        name = guild.name if guild else f"Server {server_id}"
+        admin = self.bot.get_cog("Admin")
+        if admin:
+            await admin.ban_server_globally(server_id, ctx.author.id, reason)
+        else:
+            await self.bot.db.ban_guild(server_id, ctx.author.id, reason)
+            if guild:
+                await guild.leave()
+        await ctx.send(f"🔨 **{name}** (`{server_id}`) is banned from Fliphone.\nReason: {reason}")
+
+    @commands.command(name="serverunban", aliases=["unbanguild"], hidden=True)
+    async def serverunban(self, ctx: commands.Context, server_id: int) -> None:
+        """Remove a global Fliphone server ban."""
+        if not await self._is_global_mod(ctx):
+            await ctx.send("You do not have permission to unban servers.")
+            return
+        removed = await self.bot.db.unban_guild(server_id)
+        await ctx.send(
+            f"✅ Server `{server_id}` was unbanned."
+            if removed else f"Server `{server_id}` is not banned."
+        )
 
 
 async def setup(bot) -> None:

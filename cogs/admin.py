@@ -87,8 +87,20 @@ class GifReportSelect(discord.ui.Select):
             inline=True,
         )
         embed.add_field(name="Channel", value=f"<#{report['channel_id']}>", inline=True)
+        sender_id = report.get("sender_user_id")
+        source_guild_id = report.get("source_guild_id")
+        embed.add_field(
+            name="Original Sender",
+            value=f"<@{sender_id}> (`{sender_id}`)" if sender_id else "unknown (older report)",
+            inline=False,
+        )
+        embed.add_field(
+            name="Source Server",
+            value=self.panel_view.cog._format_guild_identity(source_guild_id),
+            inline=False,
+        )
         embed.add_field(name="Status", value=str(report.get("status") or "pending"), inline=True)
-        embed.set_footer(text="Use the panel buttons to blacklist, whitelist, or refresh.")
+        embed.set_footer(text="Select moderation actions from the main report panel.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -143,6 +155,34 @@ class GifReportPanelView(discord.ui.View):
     async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self._refresh(interaction)
 
+    @discord.ui.button(label="Ban Sender", style=discord.ButtonStyle.danger)
+    async def ban_sender(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        report = await self.cog.db.get_gif_report(self.selected_report_id) if self.selected_report_id else None
+        sender_id = report.get("sender_user_id") if report else None
+        if not sender_id:
+            await interaction.response.send_message(
+                "This older report does not contain the original sender ID.", ephemeral=True
+            )
+            return
+        await interaction.response.defer()
+        await self.cog.db.ban_user(int(sender_id), interaction.user.id, f"GIF report #{report['id']}")
+        await self._refresh(interaction, f"User `{sender_id}` is now banned from Fliphone.")
+
+    @discord.ui.button(label="Ban Server", style=discord.ButtonStyle.danger)
+    async def ban_server(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        report = await self.cog.db.get_gif_report(self.selected_report_id) if self.selected_report_id else None
+        guild_id = report.get("source_guild_id") if report else None
+        if not guild_id:
+            await interaction.response.send_message(
+                "This older report does not contain the source server ID.", ephemeral=True
+            )
+            return
+        await interaction.response.defer()
+        await self.cog.ban_server_globally(
+            int(guild_id), interaction.user.id, f"GIF report #{report['id']}"
+        )
+        await self._refresh(interaction, f"Server `{guild_id}` is now banned from Fliphone.")
+
 
 class Admin(commands.Cog, name="Admin"):
     def __init__(self, bot) -> None:
@@ -152,6 +192,22 @@ class Admin(commands.Cog, name="Admin"):
 
     def create_gif_report_panel_view(self, reports: list[dict]) -> Optional[discord.ui.View]:
         return GifReportPanelView(self, reports) if reports else None
+
+    def _format_guild_identity(self, guild_id: Optional[int]) -> str:
+        if not guild_id:
+            return "unknown (older report)"
+        guild = self.bot.get_guild(int(guild_id))
+        return f"{guild.name} (`{guild_id}`)" if guild else f"Server `{guild_id}`"
+
+    async def ban_server_globally(self, guild_id: int, moderator_id: int, reason: str) -> None:
+        await self.db.ban_guild(guild_id, moderator_id, reason)
+        guild = self.bot.get_guild(guild_id)
+        if guild:
+            await self._clear_guild_setup_state(guild, notify_partner=True)
+            try:
+                await guild.leave()
+            except discord.HTTPException:
+                pass
 
     def _invite_url(self, guild_id: Optional[int] = None) -> str:
         url = (
@@ -282,17 +338,17 @@ class Admin(commands.Cog, name="Admin"):
                 pb_cog._cancel_timeout(queue_channel_id)
                 pb_cog._cancel_queue_nudge(queue_channel_id)
 
-        room_member = await self.db.get_room_member(channel_id)
-        if room_member:
+        for room_member in await self.db.get_guild_room_members(guild.id):
+            member_channel_id = int(room_member["channel_id"])
             if room_cog and hasattr(room_cog, "_remove_member"):
                 await room_cog._remove_member(
-                    channel_id,
+                    member_channel_id,
                     room_member["room_id"],
                     broadcast_reason=f"📡 **Station {room_member['station']}** reset its setup.",
                     notify_leaver=False,
                 )
             else:
-                await self.db.remove_room_member(channel_id)
+                await self.db.remove_room_member(member_channel_id)
 
         old_channel = self.bot.get_channel(channel_id)
         await self._delete_fliphone_webhooks(
@@ -901,9 +957,18 @@ class Admin(commands.Cog, name="Admin"):
     # ── f.ban ─────────────────────────────────────────────────────────────────
 
     @commands.command(name="ban")
-    @commands.is_owner()
     async def ban_user(self, ctx: commands.Context, user_id: int, *, reason: str = "No reason given") -> None:
-        """[Bot owner only] Ban a user by ID from using Phonebooth across all servers."""
+        """[Bot owner + trusted mods] Ban a user ID across all servers."""
+        if not await self._is_global_mod(ctx.author, ctx.guild):
+            await ctx.send("❌ Only the bot owner and trusted mods can use this command.")
+            return
+        guild = self.bot.get_guild(user_id)
+        if guild:
+            await ctx.send(
+                f"⚠️ `{user_id}` is the server ID for **{guild.name}**, not a user ID. "
+                f"Use `f.serverban {user_id} <reason>` to ban that server."
+            )
+            return
         await self.db.ban_user(user_id, ctx.author.id, reason)
         user = self.bot.get_user(user_id)
         name = str(user) if user else f"User {user_id}"
@@ -912,9 +977,11 @@ class Admin(commands.Cog, name="Admin"):
     # ── f.unban ───────────────────────────────────────────────────────────────
 
     @commands.command(name="unban")
-    @commands.is_owner()
     async def unban_user(self, ctx: commands.Context, user_id: int) -> None:
-        """[Bot owner only] Unban a user from Phonebooth."""
+        """[Bot owner + trusted mods] Unban a user from Phonebooth."""
+        if not await self._is_global_mod(ctx.author, ctx.guild):
+            await ctx.send("❌ Only the bot owner and trusted mods can use this command.")
+            return
         removed = await self.db.unban_user(user_id)
         if not removed:
             await ctx.send(f"❌ User `{user_id}` isn't banned.")

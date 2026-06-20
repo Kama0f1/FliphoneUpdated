@@ -211,6 +211,11 @@ class PhoneboothBot(commands.AutoShardedBot):
         await self._update_presence()
         await self._post_topgg_stats()
 
+        if await self.db.is_guild_banned(guild.id):
+            logger.warning("Immediately leaving banned guild: %s (%s)", guild.name, guild.id)
+            await guild.leave()
+            return
+
         # ── Check missing permissions ─────────────────────────────────────────
         missing = []
         bot_member = guild.me

@@ -55,6 +55,8 @@ SUDO_COMMANDS = [
     ("dbstatus", "f.dbstatus", "Check safe database health and row counts."),
     ("ban", "f.ban <user_id> [reason]", "Apply a bot-wide user ban."),
     ("unban", "f.unban <user_id>", "Remove a bot-wide user ban."),
+    ("serverban", "f.serverban <server_id> [reason]", "Ban a server and remove Fliphone from it."),
+    ("serverunban", "f.serverunban <server_id>", "Remove a bot-wide server ban."),
     ("notifyignore", "f.notifyignore <user_id>", "Exclude a tester from queue broadcasts."),
     ("servers", "f.servers", "List servers containing the bot."),
     ("leaveserver", "f.leaveserver <server_id>", "Force the bot to leave a server."),

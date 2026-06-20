@@ -1091,6 +1091,9 @@ class Phonebooth(commands.Cog):
                 guild_id=target_gid,
                 session_type="call",
                 session_id=conn["id"],
+                sender_user_id=message.author.id,
+                source_guild_id=message.guild.id,
+                source_channel_id=message.channel.id,
             )
             prompt = await send_channel.send(view=GifReportView(), silent=True)
             await self.db.set_gif_report_prompt(report_id, prompt.id, prompt.channel.id)
@@ -1482,8 +1485,9 @@ class Phonebooth(commands.Cog):
     @commands.cooldown(1, 5, commands.BucketType.channel)
     async def call(self, ctx: commands.Context) -> None:
         """Dial into the queue, or connect instantly."""
-        is_banned, cfg, conn, room_member, q = await asyncio.gather(
+        is_banned, guild_banned, cfg, conn, room_member, q = await asyncio.gather(
             self.db.is_user_banned(ctx.author.id),
+            self.db.is_guild_banned(ctx.guild.id),
             self._get_guild_config_cached(ctx.guild.id),
             self._get_connection_cached(ctx.channel.id),
             self.db.get_room_member(ctx.channel.id),
@@ -1492,6 +1496,9 @@ class Phonebooth(commands.Cog):
 
         if is_banned:
             await ctx.send("🚫 You are banned from using Fliphone.")
+            return
+        if guild_banned:
+            await ctx.send("🚫 This server is banned from using Fliphone.")
             return
 
         if not cfg:

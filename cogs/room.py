@@ -1174,6 +1174,9 @@ class Room(commands.Cog):
                                 guild_id=other["guild_id"],
                                 session_type="room",
                                 session_id=room["id"],
+                                sender_user_id=message.author.id,
+                                source_guild_id=message.guild.id,
+                                source_channel_id=message.channel.id,
                             )
                             if GifReportView:
                                 prompt = await other_ch.send(view=GifReportView(), silent=True)
@@ -1266,6 +1269,9 @@ class Room(commands.Cog):
 
         if await self.db.is_user_banned(ctx.author.id):
             await finish("🚫 You are banned from using Fliphone.")
+            return
+        if await self.db.is_guild_banned(ctx.guild.id):
+            await finish("🚫 This server is banned from using Fliphone.")
             return
 
         cfg = await self.db.get_guild_config(ctx.guild.id)
