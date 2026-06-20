@@ -246,17 +246,37 @@ class GifReportView(discord.ui.View):
         # ── Auto-delete the GIF message from the channel ──────────────────────
         deleted = False
         if report["msg_id"] and report["channel_id"]:
+            ch = interaction.client.get_channel(report["channel_id"])
             try:
-                ch = interaction.client.get_channel(report["channel_id"])
                 if ch:
                     msg = await ch.fetch_message(report["msg_id"])
                     await msg.delete()
                     deleted = True
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            except discord.NotFound:
+                deleted = True
+            except (discord.Forbidden, discord.HTTPException):
                 pass
 
+            # Bot-authored deletion needs Manage Messages. Use the owning
+            # webhook token instead when the channel only grants Manage Webhooks.
+            if ch and not deleted:
+                try:
+                    webhooks = await ch.webhooks()
+                    for webhook in webhooks:
+                        if webhook.user != interaction.client.user or webhook.name != "Fliphone":
+                            continue
+                        try:
+                            await webhook.delete_message(report["msg_id"])
+                            deleted = True
+                            break
+                        except discord.NotFound:
+                            continue
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+
         if interaction.message:
-            await interaction.message.edit(content="GIF reported and removed.", view=None)
+            result = "GIF reported and removed." if deleted else "GIF reported; removal failed."
+            await interaction.message.edit(content=result, view=None)
 
         # ── Log to report channel ─────────────────────────────────────────────
         report_ch_id = int(config.REPORT_LOG_CHANNEL_ID) if config.REPORT_LOG_CHANNEL_ID else 0
@@ -292,9 +312,12 @@ class GifReportView(discord.ui.View):
                 except discord.HTTPException:
                     pass
 
-        await interaction.followup.send(
-            "✅ GIF removed and flagged for review. Thanks!", ephemeral=True
+        confirmation = (
+            "✅ GIF removed and flagged for review. Thanks!"
+            if deleted
+            else "⚠️ GIF flagged for review, but Discord would not let Fliphone remove the message."
         )
+        await interaction.followup.send(confirmation, ephemeral=True)
 
 class GifReportLogView(discord.ui.View):
     def __init__(self) -> None:
