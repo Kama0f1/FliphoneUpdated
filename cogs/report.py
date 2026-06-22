@@ -195,10 +195,13 @@ class UserReportPanelView(discord.ui.View):
             await interaction.response.send_message("No call report selected.", ephemeral=True)
             return
         await interaction.response.defer()
+        report = await self.cog.db.get_call_report(self.selected_report_id)
         success = await self.cog.db.resolve_call_report(self.selected_report_id)
         if not success:
             await self._refresh(interaction, "That report was already resolved or no longer exists.")
             return
+        if report:
+            await self.cog._delete_call_report_review_message(report)
         self.cog._report_session_ids.pop(self.selected_report_id, None)
         await self._refresh(interaction, f"Call report #{self.selected_report_id} resolved.")
 
@@ -220,6 +223,19 @@ class Report(commands.Cog):
 
         # report_id -> active/previous conversation log key (content remains in the log only)
         self._report_session_ids: dict[int, int] = {}
+
+    async def _delete_call_report_review_message(self, report: dict) -> None:
+        message_id = report.get("review_msg_id")
+        channel_id = report.get("review_channel_id")
+        if not message_id or not channel_id:
+            return
+        try:
+            channel = self.bot.get_channel(int(channel_id))
+            if channel is None:
+                channel = await self.bot.fetch_channel(int(channel_id))
+            await channel.get_partial_message(int(message_id)).delete()
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError):
+            pass
 
     # ── Called by Phonebooth cog during every relay ───────────────────────────
 
@@ -520,7 +536,10 @@ class Report(commands.Cog):
         )
 
         try:
-            await log_ch.send(embed=log_embed, file=transcript_file)
+            review_message = await log_ch.send(embed=log_embed, file=transcript_file)
+            await self.db.set_call_report_review_message(
+                report_id, review_message.id, review_message.channel.id
+            )
         except discord.HTTPException:
             pass
 
@@ -785,11 +804,14 @@ class Report(commands.Cog):
             await ctx.send("❌ You don't have permission to use this command.")
             return
 
+        report = await self.db.get_call_report(report_id)
         success = await self.db.resolve_call_report(report_id)
         if not success:
             await ctx.send(f"❌ No open report found with ID `{report_id}`.")
             return
 
+        if report:
+            await self._delete_call_report_review_message(report)
         self._report_session_ids.pop(report_id, None)
         await ctx.send(
             embed=discord.Embed(

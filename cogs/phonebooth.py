@@ -308,7 +308,10 @@ class GifReportView(discord.ui.View):
                     text=f"f.gifbl {report_id} → blacklist  |  f.gifwl {report_id} → whitelist  |  {config.FOOTER}"
                 )
                 try:
-                    await log_ch.send(embed=log_embed, view=GifReportLogView())
+                    review_message = await log_ch.send(embed=log_embed, view=GifReportLogView())
+                    await db.set_gif_report_review_message(
+                        report_id, review_message.id, review_message.channel.id
+                    )
                 except discord.HTTPException:
                     pass
 

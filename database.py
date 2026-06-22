@@ -152,6 +152,8 @@ CREATE TABLE IF NOT EXISTS gif_reports (
     ,sender_user_id INTEGER
     ,source_guild_id INTEGER
     ,source_channel_id INTEGER
+    ,review_msg_id INTEGER
+    ,review_channel_id INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS notify_subscribers (
@@ -273,6 +275,8 @@ CREATE TABLE IF NOT EXISTS call_reports (
     call_ended_at       TEXT,
     status              TEXT NOT NULL DEFAULT 'open',
     created_at          TEXT NOT NULL
+    ,review_msg_id      INTEGER
+    ,review_channel_id  INTEGER
 );
 """
 
@@ -366,6 +370,8 @@ CREATE TABLE IF NOT EXISTS gif_reports (
     ,sender_user_id BIGINT
     ,source_guild_id BIGINT
     ,source_channel_id BIGINT
+    ,review_msg_id BIGINT
+    ,review_channel_id BIGINT
 );
 
 CREATE TABLE IF NOT EXISTS notify_subscribers (
@@ -488,6 +494,8 @@ CREATE TABLE IF NOT EXISTS call_reports (
     call_ended_at       TEXT,
     status              TEXT NOT NULL DEFAULT 'open',
     created_at          TEXT NOT NULL
+    ,review_msg_id      BIGINT
+    ,review_channel_id  BIGINT
 );
 """
 
@@ -638,6 +646,10 @@ class Database:
             ("gif_reports", "sender_user_id", "BIGINT" if self.backend == "postgres" else "INTEGER"),
             ("gif_reports", "source_guild_id", "BIGINT" if self.backend == "postgres" else "INTEGER"),
             ("gif_reports", "source_channel_id", "BIGINT" if self.backend == "postgres" else "INTEGER"),
+            ("gif_reports", "review_msg_id", "BIGINT" if self.backend == "postgres" else "INTEGER"),
+            ("gif_reports", "review_channel_id", "BIGINT" if self.backend == "postgres" else "INTEGER"),
+            ("call_reports", "review_msg_id", "BIGINT" if self.backend == "postgres" else "INTEGER"),
+            ("call_reports", "review_channel_id", "BIGINT" if self.backend == "postgres" else "INTEGER"),
         )
         for table, column, sql_type in optional_columns:
             if not await self._has_column(table, column):
@@ -1205,6 +1217,14 @@ class Database:
 
     async def resolve_gif_report(self, report_id: int, resolution: str) -> None:
         await self._execute("UPDATE gif_reports SET status = ? WHERE id = ?", (resolution, report_id))
+
+    async def set_gif_report_review_message(
+        self, report_id: int, message_id: int, channel_id: int
+    ) -> None:
+        await self._execute(
+            "UPDATE gif_reports SET review_msg_id = ?, review_channel_id = ? WHERE id = ?",
+            (message_id, channel_id, report_id),
+        )
 
     async def get_pending_gif_reports(self) -> list[dict]:
         return await self._fetchall(
@@ -1872,6 +1892,17 @@ class Database:
             (report_id,),
         )
         return rowcount > 0
+
+    async def get_call_report(self, report_id):
+        return await self._fetchrow("SELECT * FROM call_reports WHERE id = ?", (report_id,))
+
+    async def set_call_report_review_message(
+        self, report_id: int, message_id: int, channel_id: int
+    ) -> None:
+        await self._execute(
+            "UPDATE call_reports SET review_msg_id = ?, review_channel_id = ? WHERE id = ?",
+            (message_id, channel_id, report_id),
+        )
 
     async def get_recent_call_for_guild(self, guild_id):
         return await self._fetchrow(

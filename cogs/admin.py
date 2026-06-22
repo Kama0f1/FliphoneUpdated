@@ -141,6 +141,7 @@ class GifReportPanelView(discord.ui.View):
         await interaction.response.defer()
         await self.cog.db.set_gif_url_status(report["url"], status, interaction.user.id)
         await self.cog.db.resolve_gif_report(self.selected_report_id, resolution)
+        await self.cog._delete_gif_report_review_message(report)
         await self._refresh(interaction, f"GIF report #{self.selected_report_id} marked {resolution}.")
 
     @discord.ui.button(label="Blacklist", style=discord.ButtonStyle.danger)
@@ -198,6 +199,19 @@ class Admin(commands.Cog, name="Admin"):
             return "unknown (older report)"
         guild = self.bot.get_guild(int(guild_id))
         return f"{guild.name} (`{guild_id}`)" if guild else f"Server `{guild_id}`"
+
+    async def _delete_gif_report_review_message(self, report: dict) -> None:
+        message_id = report.get("review_msg_id")
+        channel_id = report.get("review_channel_id")
+        if not message_id or not channel_id:
+            return
+        try:
+            channel = self.bot.get_channel(int(channel_id))
+            if channel is None:
+                channel = await self.bot.fetch_channel(int(channel_id))
+            await channel.get_partial_message(int(message_id)).delete()
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError):
+            pass
 
     async def ban_server_globally(self, guild_id: int, moderator_id: int, reason: str) -> None:
         await self.db.ban_guild(guild_id, moderator_id, reason)
@@ -1113,7 +1127,10 @@ class Admin(commands.Cog, name="Admin"):
 
         await self.db.set_gif_url_status(url, "blacklist", ctx.author.id)
         if id_or_url.strip().isdigit():
+            report = await self.db.get_gif_report(int(id_or_url.strip()))
             await self.db.resolve_gif_report(int(id_or_url.strip()), "blacklisted")
+            if report:
+                await self._delete_gif_report_review_message(report)
 
         embed = discord.Embed(
             title="🚫 GIF Blacklisted",
@@ -1136,7 +1153,10 @@ class Admin(commands.Cog, name="Admin"):
 
         await self.db.set_gif_url_status(url, "whitelist", ctx.author.id)
         if id_or_url.strip().isdigit():
+            report = await self.db.get_gif_report(int(id_or_url.strip()))
             await self.db.resolve_gif_report(int(id_or_url.strip()), "whitelisted")
+            if report:
+                await self._delete_gif_report_review_message(report)
 
         embed = discord.Embed(
             title="✅ GIF Whitelisted",

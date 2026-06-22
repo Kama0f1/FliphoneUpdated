@@ -31,6 +31,30 @@ class GifSubmissionReviewView(discord.ui.View):
         await interaction.response.send_message("This review panel is restricted.", ephemeral=True)
         return False
 
+    async def _finish_review(
+        self,
+        interaction: discord.Interaction,
+        embed: discord.Embed,
+        confirmation: str,
+    ) -> None:
+        removed = True
+        try:
+            await interaction.message.delete()
+        except discord.NotFound:
+            pass
+        except (discord.Forbidden, discord.HTTPException):
+            removed = False
+            try:
+                await interaction.message.edit(embed=embed, view=None)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+        suffix = (
+            " Removed from the review channel."
+            if removed
+            else " The review was saved, but Discord would not remove the message."
+        )
+        await interaction.followup.send(confirmation + suffix, ephemeral=True)
+
     async def _review(self, interaction: discord.Interaction, action: str) -> None:
         if not interaction.message or not interaction.message.embeds:
             await interaction.response.send_message("Submission metadata is missing.", ephemeral=True)
@@ -46,6 +70,10 @@ class GifSubmissionReviewView(discord.ui.View):
             submission_id, interaction.user.id, action
         )
         if not submission:
+            try:
+                await interaction.message.delete()
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
             await interaction.followup.send("This submission was already reviewed.", ephemeral=True)
             return
         embed = interaction.message.embeds[0].copy()
@@ -59,7 +87,11 @@ class GifSubmissionReviewView(discord.ui.View):
             value=f"{action.title()} by {interaction.user.mention}",
             inline=False,
         )
-        await interaction.message.edit(embed=embed, view=None)
+        await self._finish_review(
+            interaction,
+            embed,
+            f"Submission #{submission_id} {action}.",
+        )
 
     async def _punish(self, interaction: discord.Interaction, target: str) -> None:
         if not interaction.message or not interaction.message.embeds:
@@ -103,7 +135,11 @@ class GifSubmissionReviewView(discord.ui.View):
         embed = interaction.message.embeds[0].copy()
         embed.color = config.COLOR_ERR
         embed.add_field(name="Decision", value=decision, inline=False)
-        await interaction.message.edit(embed=embed, view=None)
+        await self._finish_review(
+            interaction,
+            embed,
+            f"{decision}.",
+        )
 
     @discord.ui.button(label="Approve", style=discord.ButtonStyle.success, custom_id="gif_submit:approve")
     async def approve(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
