@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import time
 import aiohttp
 import discord
 from discord.ext import commands, tasks
@@ -104,7 +103,6 @@ class PhoneboothBot(commands.AutoShardedBot):
             shard_count=shard_count,
         )
         self.db = Database()
-        self._command_started: dict[int, float] = {}
         self.log_channel_id = getattr(config, "LOG_CHANNEL_ID", 0) or getattr(config, "REPORT_LOG_CHANNEL_ID", 0)
         self.discord_log_handler: DiscordLogHandler | None = None
         if self.log_channel_id:
@@ -299,21 +297,6 @@ class PhoneboothBot(commands.AutoShardedBot):
         if isinstance(error, commands.CommandNotFound):
             return
         if isinstance(error, commands.MissingPermissions):
-            result = "missing_permissions"
-        elif isinstance(error, commands.BotMissingPermissions):
-            result = "bot_missing_permissions"
-        elif isinstance(error, commands.CommandOnCooldown):
-            result = "cooldown"
-        elif isinstance(error, commands.NoPrivateMessage):
-            result = "server_only"
-        elif isinstance(error, commands.UserInputError):
-            result = "bad_input"
-        elif isinstance(error, commands.CheckFailure):
-            result = "blocked"
-        else:
-            result = "internal_error"
-        self._log_command_result(ctx, result)
-        if isinstance(error, commands.MissingPermissions):
             await ctx.send(
                 embed=discord.Embed(
                     description="❌ Only a server admin can run this command.",
@@ -350,15 +333,7 @@ class PhoneboothBot(commands.AutoShardedBot):
     # ── Command / Interaction logging ────────────────────────────────────
 
     async def on_command(self, ctx: commands.Context) -> None:
-        """Start command timing; completion/error handlers write the result."""
-        self._command_started[id(ctx)] = time.perf_counter()
-
-    async def on_command_completion(self, ctx: commands.Context) -> None:
-        """Log a successfully completed command."""
-        self._log_command_result(ctx, "success")
-
-    def _log_command_result(self, ctx: commands.Context, result: str) -> None:
-        """Write one compact result line for a command invocation."""
+        """Log a command once with stable user and server IDs."""
         try:
             cmd = ctx.command.qualified_name if ctx.command else "(unknown)"
             user_name = str(ctx.author).replace("\n", " ").replace("\r", " ")
@@ -368,18 +343,14 @@ class PhoneboothBot(commands.AutoShardedBot):
                 guild = f"{guild_name} ({ctx.guild.id})"
             else:
                 guild = "DM"
-            started = self._command_started.pop(id(ctx), None)
-            elapsed_ms = int((time.perf_counter() - started) * 1000) if started else 0
             logger.info(
-                "Command: %s | result=%s | elapsed=%dms | user=%s | server=%s",
+                "Command: %s | user=%s | server=%s",
                 cmd,
-                result,
-                elapsed_ms,
                 user,
                 guild,
             )
         except Exception:
-            logger.exception("Failed to log command result")
+            logger.exception("Failed to log command invocation")
 
     async def on_interaction(self, interaction: discord.Interaction) -> None:
         """Log standalone app commands; hybrid commands are logged by on_command."""

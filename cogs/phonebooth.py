@@ -343,8 +343,7 @@ _CONNECTED_MSG = (
     "You are now in a call!\n"
     "Please remember to respect the user on the other end.\n"
     "To skip a user, use `f.skip`  "
-    "To report a user, click on the message and click apps then click "
-    "Report Message or reply to the message and do `f.block`\n\n"
+    "To report a user, use `/report`. To block a user, use `f.block`.\n\n"
     "*By continuing, you agree to be respectful. "
     "To opt out, ask an admin to run `f.setup` in the channel to unconfigure it.*"
 )
