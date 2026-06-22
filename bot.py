@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 import aiohttp
 import discord
 from discord.ext import commands, tasks
@@ -103,6 +104,7 @@ class PhoneboothBot(commands.AutoShardedBot):
             shard_count=shard_count,
         )
         self.db = Database()
+        self._command_started: dict[int, float] = {}
         self.log_channel_id = getattr(config, "LOG_CHANNEL_ID", 0) or getattr(config, "REPORT_LOG_CHANNEL_ID", 0)
         self.discord_log_handler: DiscordLogHandler | None = None
         if self.log_channel_id:
@@ -297,6 +299,21 @@ class PhoneboothBot(commands.AutoShardedBot):
         if isinstance(error, commands.CommandNotFound):
             return
         if isinstance(error, commands.MissingPermissions):
+            result = "missing_permissions"
+        elif isinstance(error, commands.BotMissingPermissions):
+            result = "bot_missing_permissions"
+        elif isinstance(error, commands.CommandOnCooldown):
+            result = "cooldown"
+        elif isinstance(error, commands.NoPrivateMessage):
+            result = "server_only"
+        elif isinstance(error, commands.UserInputError):
+            result = "bad_input"
+        elif isinstance(error, commands.CheckFailure):
+            result = "blocked"
+        else:
+            result = "internal_error"
+        self._log_command_result(ctx, result)
+        if isinstance(error, commands.MissingPermissions):
             await ctx.send(
                 embed=discord.Embed(
                     description="❌ Only a server admin can run this command.",
@@ -333,20 +350,61 @@ class PhoneboothBot(commands.AutoShardedBot):
     # ── Command / Interaction logging ────────────────────────────────────
 
     async def on_command(self, ctx: commands.Context) -> None:
-        """Log prefix command invocations."""
+        """Start command timing; completion/error handlers write the result."""
+        self._command_started[id(ctx)] = time.perf_counter()
+
+    async def on_command_completion(self, ctx: commands.Context) -> None:
+        """Log a successfully completed command."""
+        self._log_command_result(ctx, "success")
+
+    def _log_command_result(self, ctx: commands.Context, result: str) -> None:
+        """Write one compact result line for a command invocation."""
         try:
             cmd = ctx.command.qualified_name if ctx.command else "(unknown)"
-            guild = f"{ctx.guild.name}({ctx.guild.id})" if ctx.guild else "DM"
-            logger.info("Command: %s invoked by %s in %s: %s", cmd, ctx.author, guild, ctx.message.content)
+            user_name = str(ctx.author).replace("\n", " ").replace("\r", " ")
+            user = f"{user_name} ({ctx.author.id})"
+            if ctx.guild:
+                guild_name = ctx.guild.name.replace("\n", " ").replace("\r", " ")
+                guild = f"{guild_name} ({ctx.guild.id})"
+            else:
+                guild = "DM"
+            started = self._command_started.pop(id(ctx), None)
+            elapsed_ms = int((time.perf_counter() - started) * 1000) if started else 0
+            logger.info(
+                "Command: %s | result=%s | elapsed=%dms | user=%s | server=%s",
+                cmd,
+                result,
+                elapsed_ms,
+                user,
+                guild,
+            )
         except Exception:
-            logger.exception("Failed to log command invocation")
+            logger.exception("Failed to log command result")
 
     async def on_interaction(self, interaction: discord.Interaction) -> None:
-        """Log application command (slash) invocations."""
+        """Log standalone app commands; hybrid commands are logged by on_command."""
         try:
             if interaction.type == discord.InteractionType.application_command:
                 name = interaction.data.get("name") if isinstance(interaction.data, dict) else str(interaction.data)
-                guild = f"{interaction.guild_id}" if interaction.guild_id else "DM"
-                logger.info("App command: %s invoked by %s in %s", name, interaction.user, guild)
+                hybrid_names = {
+                    command.app_command.name
+                    for command in self.walk_commands()
+                    if isinstance(command, commands.HybridCommand) and command.app_command
+                }
+                if name in hybrid_names:
+                    return
+                user_name = str(interaction.user).replace("\n", " ").replace("\r", " ")
+                user = f"{user_name} ({interaction.user.id})"
+                if interaction.guild:
+                    guild_name = interaction.guild.name.replace("\n", " ").replace("\r", " ")
+                    guild = f"{guild_name} ({interaction.guild.id})"
+                else:
+                    guild = "DM"
+                logger.info(
+                    "App command: %s | user=%s | server=%s",
+                    name,
+                    user,
+                    guild,
+                )
         except Exception:
             logger.exception("Failed to log interaction")
