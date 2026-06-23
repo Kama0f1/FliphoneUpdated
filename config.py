@@ -81,6 +81,7 @@ TRUSTED_MOD_IDS: set[int] = {
     1423635237505859689,
     *_parse_int_set(os.getenv("TRUSTED_MOD_IDS", "")),
 }
+TRUSTED_MOD_IDS.discard(723239598343454831)
 
 # These guild IDs grant all members with administrator permission the same
 # GIF moderation rights as TRUSTED_MOD_IDS.
