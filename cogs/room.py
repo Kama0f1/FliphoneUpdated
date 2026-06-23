@@ -37,7 +37,6 @@ import config
 from database import Database
 from filter import filter_message
 from relay_policy import (
-    contains_custom_emoji,
     extract_urls,
     is_direct_gif_url,
     is_local_only,
@@ -884,15 +883,6 @@ class Room(commands.Cog):
         if is_local_only(raw):
             return
 
-        if contains_custom_emoji(raw):
-            try:
-                await message.channel.send(
-                    "Custom server emojis are not relayed. Use regular keyboard emojis instead.",
-                    delete_after=8,
-                )
-            except discord.HTTPException:
-                pass
-
         # ── Anti text-wall: check raw content BEFORE filtering ────────────────
         raw_lines = raw.splitlines()
         if len(raw) > ROOM_MAX_MSG_LEN:
@@ -974,24 +964,12 @@ class Room(commands.Cog):
         # ── Attachments ───────────────────────────────────────────────────────
         GIF_EXT = {".gif"}
         attachment_gif_urls: list[str] = []
-        blocked_attachment_count = len(message.stickers)
 
         for att in message.attachments:
             ext = ("." + att.filename.rsplit(".", 1)[-1].lower()) if "." in att.filename else ""
             if ext in GIF_EXT:
                 content += f"\n{att.url}"
                 attachment_gif_urls.append(att.url)
-            else:
-                blocked_attachment_count += 1
-
-        if blocked_attachment_count:
-            try:
-                await message.channel.send(
-                    f"⚠️ {message.author.mention} Only text and GIFs are allowed in rooms.",
-                    delete_after=8,
-                )
-            except discord.HTTPException:
-                pass
 
         # Deduplicate GIFs
         def _norm(u: str) -> str:
@@ -1320,6 +1298,12 @@ class Room(commands.Cog):
             )
             return
 
+        anon_note = (
+            "\n\n🎭 **Mask is ON** — your relayed messages will use your Stranger identity."
+            if await self.db.is_user_anonymous(ctx.author.id)
+            else ""
+        )
+
         # ── Try to slot into an existing room ─────────────────────────────────
         room = None
         if not force_new:
@@ -1366,7 +1350,7 @@ class Room(commands.Cog):
                         "• `f.roomstatus` — see who's in the room\n"
                         "• `f.roomkick <station>` — start a vote to remove a station\n"
                         "• `f.roomleave` — leave quietly  ·  `f.roomskip` — skip to a new room\n\n"
-                        "*By continuing you agree to be respectful.*"
+                        f"*By continuing you agree to be respectful.*{anon_note}"
                     ),
                     color=config.COLOR_OK,
                 )
@@ -1410,7 +1394,7 @@ class Room(commands.Cog):
                     "You joined as **Station Alpha**!\n"
                     f"Waiting for up to **{ROOM_QUEUE_TIMEOUT_MINUTES} minutes** for other servers.\n"
                     "When a 2nd server joins, the room goes live automatically.\n\n"
-                    "Use `f.roomleave` to cancel."
+                    f"Use `f.roomleave` to cancel.{anon_note}"
                 ),
                 color=config.COLOR_WAIT,
             )

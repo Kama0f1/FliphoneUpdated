@@ -31,7 +31,6 @@ import config
 from database import Database
 from filter import filter_message
 from relay_policy import (
-    contains_custom_emoji,
     extract_urls,
     is_direct_gif_url,
     is_local_only,
@@ -350,6 +349,7 @@ _CONNECTED_MSG = (
     "*By continuing, you agree to be respectful. "
     "To opt out, ask an admin to run `f.setup` in the channel to unconfigure it.*"
 )
+_MASK_ON_NOTICE = "\n\n🎭 **Mask is ON** — your relayed messages will use your Stranger identity."
 
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
@@ -879,6 +879,10 @@ class Phonebooth(commands.Cog):
         self._user_policy_cache[user_id] = (now + 60, banned, anonymous)
         return banned, anonymous
 
+    async def _connected_message_for(self, user_id: int) -> str:
+        _, anonymous = await self._get_user_relay_policy(user_id)
+        return _CONNECTED_MSG + (_MASK_ON_NOTICE if anonymous else "")
+
     async def probe_webhook_avatar(
         self,
         channel: discord.TextChannel,
@@ -1184,15 +1188,6 @@ class Phonebooth(commands.Cog):
         if is_local_only(raw_content):
             return
 
-        if contains_custom_emoji(raw_content):
-            try:
-                await message.channel.send(
-                    "Custom server emojis are not relayed. Use regular keyboard emojis instead.",
-                    delete_after=8,
-                )
-            except discord.HTTPException:
-                pass
-
         content, was_censored = filter_message(raw_content)
         if was_censored:
             try:
@@ -1256,15 +1251,6 @@ class Phonebooth(commands.Cog):
                 attachment_gif_urls.append(att.url)
             else:
                 blocked_attachment_count += 1
-
-        if blocked_attachment_count:
-            try:
-                await message.channel.send(
-                    f"⚠️ {message.author.mention} Only text and GIFs are allowed in calls.",
-                    delete_after=8,
-                )
-            except discord.HTTPException:
-                pass
 
         # ── All GIF URLs (inline + attachments) — deduplicate by stripped URL ──
         def _norm_dedup(u: str) -> str:
@@ -1544,11 +1530,11 @@ class Phonebooth(commands.Cog):
             self._cancel_queue_nudge(match["channel_id"])
             conn_id = int(new_conn["id"])
             self._cache_connection(new_conn)
-            await ctx.send(_CONNECTED_MSG)
+            await ctx.send(await self._connected_message_for(ctx.author.id))
             partner_channel = self.bot.get_channel(match["channel_id"])
             if partner_channel:
                 try:
-                    await partner_channel.send(_CONNECTED_MSG)
+                    await partner_channel.send(await self._connected_message_for(match["user_id"]))
                 except discord.HTTPException:
                     pass
             # Start inactivity timer for this call
@@ -1717,11 +1703,11 @@ class Phonebooth(commands.Cog):
             self._cancel_queue_nudge(match["channel_id"])
             conn_id = int(new_conn["id"])
             self._cache_connection(new_conn)
-            await ctx.send(_CONNECTED_MSG)
+            await ctx.send(await self._connected_message_for(ctx.author.id))
             partner_channel = self.bot.get_channel(match["channel_id"])
             if partner_channel:
                 try:
-                    await partner_channel.send(_CONNECTED_MSG)
+                    await partner_channel.send(await self._connected_message_for(match["user_id"]))
                 except discord.HTTPException:
                     pass
             self._reset_inactivity(conn_id, ctx.channel.id, match["channel_id"])
