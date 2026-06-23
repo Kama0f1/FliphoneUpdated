@@ -1332,14 +1332,6 @@ class Phonebooth(commands.Cog):
 
         # ── Check if message is now empty ───────────────────────────────────
         if not text_content and not files:
-            if not blocked_attachment_count:
-                try:
-                    await message.channel.send(
-                        f"⚠️ {message.author.mention} Your message was not sent because it contained no relayable content.",
-                        delete_after=8,
-                    )
-                except Exception:
-                    pass
             return
 
         conn["msg_count"] = int(conn.get("msg_count", 0)) + 1
