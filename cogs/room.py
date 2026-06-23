@@ -851,10 +851,13 @@ class Room(commands.Cog):
                 except Exception:
                     ref_avatar = None
                 ref_text = (ref_msg.content or "").strip()
-                # Strip lines that are bare URLs (GIF links etc.)
-                ref_text = " ".join(
-                    l for l in ref_text.splitlines() if not l.startswith("http")
-                ).strip()
+                if is_local_only(ref_text):
+                    ref_text = "message"
+                else:
+                    # Strip lines that are bare URLs (GIF links etc.)
+                    ref_text = " ".join(
+                        l for l in ref_text.splitlines() if not l.startswith("http")
+                    ).strip()
                 if len(ref_text) > 100:
                     ref_text = ref_text[:100] + "…"
                 elif not ref_text:

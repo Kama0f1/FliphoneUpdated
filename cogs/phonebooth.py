@@ -1150,10 +1150,13 @@ class Phonebooth(commands.Cog):
                     ref_avatar = str(ref_msg.author.display_avatar.with_static_format("png").with_size(64).url).split("?")[0]
                 except Exception:
                     ref_avatar = None
-                ref_text   = (ref_msg.content or "").strip()
-                ref_text   = " ".join(
-                    l for l in ref_text.splitlines() if not l.startswith("http")
-                ).strip()
+                ref_text = (ref_msg.content or "").strip()
+                if is_local_only(ref_text):
+                    ref_text = "message"
+                else:
+                    ref_text = " ".join(
+                        l for l in ref_text.splitlines() if not l.startswith("http")
+                    ).strip()
                 if len(ref_text) > 100:
                     ref_text = ref_text[:100] + "…"
                 elif not ref_text:

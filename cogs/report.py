@@ -42,7 +42,7 @@ REPORT_LOG_CHANNEL_ID = int(os.getenv("USER_REPORT_LOG_CHANNEL_ID", 149720591508
 # How many recent messages to keep in the rolling log per call
 MAX_LOG_ENTRIES = 50
 MAX_LOG_CONTENT_CHARS = 2_000
-POST_CONVERSATION_RETENTION_SECONDS = 24 * 60 * 60
+POST_CONVERSATION_RETENTION_SECONDS = 7 * 24 * 60 * 60
 
 
 # ── Report Modal (slash command) ──────────────────────────────────────────────

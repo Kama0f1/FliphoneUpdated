@@ -1,6 +1,6 @@
 # Privacy Policy for Fliphone
 
-**Last updated: June 19, 2026**
+**Last updated: June 23, 2026**
 
 Fliphone is a Discord bot that connects users across servers for 1:1 calls and group rooms. This policy explains what data the bot handles and why.
 
@@ -18,11 +18,11 @@ Fliphone is a Discord bot that connects users across servers for 1:1 calls and g
 
 ## Message Content and Reports
 
-Fliphone relays message content in real time. It does not write ordinary conversation text to PostgreSQL or weekly database backups.
+Fliphone relays message content in real time. Ordinary live conversation text is not stored as long-term database data and is not written to PostgreSQL or weekly database backups.
 
-For safety reports, the bot keeps a rolling in-memory buffer of up to the last 50 relayed messages per conversation. Each entry is limited to 2,000 characters. The buffer is removed 24 hours after a call or room ends, when the process restarts, or when it is otherwise cleared.
+For safety reports, the bot keeps a rolling in-memory buffer of up to the last 50 relayed messages per conversation. Each entry is limited to 2,000 characters. The buffer is removed 7 days after a call or room ends, when the process restarts, or when it is otherwise cleared.
 
-If a user submits a report, a short preview and a text file containing the captured conversation excerpt may be posted to a private Discord moderation channel for review. The excerpt contains at most the last 50 relayed messages. That Discord message may remain until moderators delete it. Report metadata and the report reason are stored in the database.
+If a user submits a report, a short preview and a text file containing the captured conversation excerpt may be posted to a private Discord moderation channel for review. The excerpt contains at most the last 50 relayed messages. Report context is limited and retained for 7 days or less in Fliphone's own systems; report messages in Discord can be deleted after review or upon a valid deletion request. Report metadata and the report reason are stored in the database.
 
 Messages beginning with `x ` or `X ` stay in the local Discord channel and are not relayed or added to the report buffer.
 
