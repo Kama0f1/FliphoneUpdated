@@ -8,7 +8,7 @@ f.hangup / f.h    – End call or leave queue
 f.skip / f.s      – Hang up and immediately redial
 f.status          – Show current status
 f.block           – Block the server you're talking to
-f.anon / f.mask   – Toggle your personal Stranger identity
+f.anon            – Toggle your personal tarot identity
 f.fr              – Share your username as a friend request card
 """
 
@@ -90,8 +90,12 @@ def _elapsed_seconds(timestamp: Optional[str]) -> float:
 
 def _anon_identity(seed: int) -> tuple[str, str]:
     rng = random.Random(seed)
-    name = f"Stranger {rng.choice(config.ANON_NAMES)}"
-    avatar = f"https://robohash.org/{seed}?set=set4&size=256x256"
+    name = rng.choice(config.ANON_NAMES)
+    avatar_file = config.ANON_AVATARS.get(name)
+    if avatar_file:
+        avatar = f"{config.ANON_AVATAR_BASE_URL.rstrip('/')}/{avatar_file}"
+    else:
+        avatar = f"https://robohash.org/tarot-{seed}?set=set4&size=256x256"
     return name, avatar
 
 
@@ -349,7 +353,9 @@ _CONNECTED_MSG = (
     "*By continuing, you agree to be respectful. "
     "To opt out, ask an admin to run `f.setup` in the channel to unconfigure it.*"
 )
-_MASK_ON_NOTICE = "\n\n🎭 **Mask is ON** — your relayed messages will use your Stranger identity."
+_ANON_NOTICE = (
+    "🎭 **Anon mode is ON** — other servers will see you as a tarot card identity."
+)
 
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
@@ -880,8 +886,20 @@ class Phonebooth(commands.Cog):
         return banned, anonymous
 
     async def _connected_message_for(self, user_id: int) -> str:
+        return _CONNECTED_MSG
+
+    async def _notify_anon_mode_start(
+        self,
+        channel: discord.abc.Messageable,
+        user_id: int,
+    ) -> None:
         _, anonymous = await self._get_user_relay_policy(user_id)
-        return _CONNECTED_MSG + (_MASK_ON_NOTICE if anonymous else "")
+        if not anonymous:
+            return
+        try:
+            await channel.send(f"<@{user_id}> {_ANON_NOTICE}")
+        except (discord.Forbidden, discord.HTTPException):
+            pass
 
     async def probe_webhook_avatar(
         self,
@@ -1530,6 +1548,10 @@ class Phonebooth(commands.Cog):
                     await partner_channel.send(await self._connected_message_for(match["user_id"]))
                 except discord.HTTPException:
                     pass
+            await asyncio.gather(
+                self._notify_anon_mode_start(ctx.channel, ctx.author.id),
+                self._notify_anon_mode_start(partner_channel, match["user_id"]) if partner_channel else asyncio.sleep(0),
+            )
             # Start inactivity timer for this call
             self._reset_inactivity(conn_id, ctx.channel.id, match["channel_id"])
         else:
@@ -1703,6 +1725,10 @@ class Phonebooth(commands.Cog):
                     await partner_channel.send(await self._connected_message_for(match["user_id"]))
                 except discord.HTTPException:
                     pass
+            await asyncio.gather(
+                self._notify_anon_mode_start(ctx.channel, ctx.author.id),
+                self._notify_anon_mode_start(partner_channel, match["user_id"]) if partner_channel else asyncio.sleep(0),
+            )
             self._reset_inactivity(conn_id, ctx.channel.id, match["channel_id"])
         else:
             current = await self.db.get_connection(ctx.channel.id)
@@ -2083,12 +2109,12 @@ class Phonebooth(commands.Cog):
             except (discord.Forbidden, discord.HTTPException):
                 pass
 
-    # ── f.anon / f.mask ───────────────────────────────────────────────────────
+    # ── f.anon ────────────────────────────────────────────────────────────────
 
     @commands.hybrid_command(name="anon", aliases=["mask", "anonymous"])
     @commands.guild_only()
     async def anon(self, ctx: commands.Context) -> None:
-        """Toggle your personal Stranger identity."""
+        """Toggle your personal tarot anon identity."""
         # Check this is a configured phonebooth channel
         cfg, guild_cfg = await asyncio.gather(
             self._get_config_by_channel_cached(ctx.channel.id),
@@ -2100,9 +2126,9 @@ class Phonebooth(commands.Cog):
         is_anon = await self.db.toggle_user_anonymous(ctx.author.id)
         self._user_policy_cache.pop(ctx.author.id, None)
         if is_anon:
-            await ctx.send("🎭 **Mask ON** — your relayed messages will use a stable Stranger identity in each conversation.")
+            await ctx.send("🎭 **Anon mode ON** — your relayed messages will use a stable tarot identity in each conversation.")
         else:
-            await ctx.send("👤 **Mask OFF** — your relayed messages will show your filtered display name and avatar.")
+            await ctx.send("👤 **Anon mode OFF** — your relayed messages will show your filtered display name and avatar.")
 
     # ── f.fr / f.friendrequest ────────────────────────────────────────────────
 

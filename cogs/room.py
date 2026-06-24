@@ -102,9 +102,16 @@ ROOM_MAX_LINES    = 10
 
 def _anon_identity(seed: int) -> tuple[str, str]:
     rng = random.Random(seed)
-    name = f"Stranger {rng.choice(config.ANON_NAMES)}"
-    avatar = f"https://robohash.org/{seed}?set=set4&size=256x256"
+    name = rng.choice(config.ANON_NAMES)
+    avatar_file = config.ANON_AVATARS.get(name)
+    if avatar_file:
+        avatar = f"{config.ANON_AVATAR_BASE_URL.rstrip('/')}/{avatar_file}"
+    else:
+        avatar = f"https://robohash.org/tarot-{seed}?set=set4&size=256x256"
     return name, avatar
+
+
+_ANON_NOTICE = "🎭 **Anon mode is ON** — other servers will see you as a tarot card identity."
 
 
 def _get_avatar_url(member: discord.Member | discord.User) -> str:
@@ -1299,11 +1306,7 @@ class Room(commands.Cog):
             )
             return
 
-        anon_note = (
-            "\n\n🎭 **Mask is ON** — your relayed messages will use your Stranger identity."
-            if await self.db.is_user_anonymous(ctx.author.id)
-            else ""
-        )
+        is_anon = await self.db.is_user_anonymous(ctx.author.id)
 
         # ── Try to slot into an existing room ─────────────────────────────────
         room = None
@@ -1351,11 +1354,13 @@ class Room(commands.Cog):
                         "• `f.roomstatus` — see who's in the room\n"
                         "• `f.roomkick <station>` — start a vote to remove a station\n"
                         "• `f.roomleave` — leave quietly  ·  `f.roomskip` — skip to a new room\n\n"
-                        f"*By continuing you agree to be respectful.*{anon_note}"
+                        "*By continuing you agree to be respectful.*"
                     ),
                     color=config.COLOR_OK,
                 )
             )
+            if is_anon:
+                await ctx.send(f"{ctx.author.mention} {_ANON_NOTICE}")
             notices = []
             for m in all_members:
                 if m["channel_id"] == ctx.channel.id:
@@ -1395,11 +1400,13 @@ class Room(commands.Cog):
                     "You joined as **Station Alpha**!\n"
                     f"Waiting for up to **{ROOM_QUEUE_TIMEOUT_MINUTES} minutes** for other servers.\n"
                     "When a 2nd server joins, the room goes live automatically.\n\n"
-                    f"Use `f.roomleave` to cancel.{anon_note}"
+                    "Use `f.roomleave` to cancel."
                 ),
                 color=config.COLOR_WAIT,
             )
         )
+        if is_anon:
+            await ctx.send(f"{ctx.author.mention} {_ANON_NOTICE}")
 
     # ── f.room ────────────────────────────────────────────────────────────────
 

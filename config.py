@@ -52,12 +52,37 @@ TOS_URL: str = os.getenv(
 
 # ── Display ───────────────────────────────────────────────────────────────────
 ANON_NAMES: list[str] = [
-    "Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot",
-    "Golf",  "Hotel", "India",   "Juliet","Kilo", "Lima",
-    "Mike",  "November","Oscar", "Papa",  "Quebec","Romeo",
-    "Sierra","Tango","Uniform",  "Victor","Whiskey","X-ray",
-    "Yankee","Zulu",
+    "The Fool",
+    "The Magician",
+    "The High Priestess",
+    "The Empress",
+    "The Emperor",
+    "The Hierophant",
+    "The Lovers",
+    "The Chariot",
+    "Strength",
+    "The Hermit",
+    "Wheel of Fortune",
+    "Justice",
+    "The Hanged Man",
+    "Death",
+    "Temperance",
+    "The Devil",
+    "The Tower",
+    "The Star",
+    "The Moon",
+    "The Sun",
+    "Judgement",
+    "The World",
 ]
+
+ANON_AVATAR_BASE_URL: str = os.getenv(
+    "ANON_AVATAR_BASE_URL",
+    "https://raw.githubusercontent.com/Kama0f1/FliphoneUpdated/main/assets/anon_avatars",
+)
+ANON_AVATARS: dict[str, str] = {
+    "The Fool": "the_fool.jpg",
+}
 
 ANON_COLORS: list[int] = [
     0xFF6B6B, 0xFFE66D, 0x4ECDC4, 0x95E1D3, 0xF38181,

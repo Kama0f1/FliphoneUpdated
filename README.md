@@ -21,7 +21,7 @@ Messages are relayed in real time. A short in-memory rolling excerpt is kept tem
 - **1-on-1 calls** — matched instantly when someone is waiting, or queued for up to 10 minutes
 - **Group rooms** — up to 5 servers in one room, identified by station names
 - **Webhook relay** — messages appear with the sender's filtered display name and global Discord avatar
-- **Personal masks** — masked users appear as *Stranger [NATO word]* with a robot avatar
+- **Personal anon mode** — anon users appear as tarot card identities
 - **GIF moderation** — built-in report system with blacklist/whitelist management
 - **Content filter** — automatic censorship of slurs and harmful language
 - **Block list** — prevent specific servers from ever matching with yours again
@@ -84,7 +84,7 @@ If another server is waiting, you connect instantly. Otherwise you join the queu
 | `f.skip` | `f.s`, `f.next` | Everyone | Hang up and immediately search for a new call |
 | `f.status` | `f.pbstatus` | Everyone | Show current status (idle / queued / in call) |
 | `f.block` | — | Everyone | Block the server you're currently talking to |
-| `f.anon` | `f.mask`, `f.anonymous` | Everyone | Toggle your personal Stranger identity |
+| `f.anon` | `f.mask`, `f.anonymous` | Everyone | Toggle your personal tarot anon identity |
 | `f.fr` | `f.friendrequest` | Everyone | Share your username as a friend-request card |
 | `f.notify` | `f.notifications` | Everyone | Toggle queue DM notifications (opt-in) |
 | `f.profile` | `f.settings`, `f.me` | Everyone | Show your settings and current server/channel state |

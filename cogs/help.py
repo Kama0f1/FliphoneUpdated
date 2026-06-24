@@ -17,7 +17,7 @@ CALL_COMMANDS = [
     ("status", "f.status", "Show this channel's call state."),
     ("block", "f.block", "Block the connected server and end the call."),
     ("friendrequest", "f.fr", "Share your Discord username in the conversation."),
-    ("mask", "f.mask", "Toggle your personal Stranger identity."),
+    ("anon", "f.anon", "Toggle your tarot anon identity."),
     ("notify", "f.notify", "Toggle queue notification DMs."),
     ("addgif", "f.addgif", "Submit a GIF URL for safe relay approval."),
     ("report", "f.report", "Report the active or most recent conversation."),
