@@ -82,6 +82,27 @@ ANON_AVATAR_BASE_URL: str = os.getenv(
 )
 ANON_AVATARS: dict[str, str] = {
     "The Fool": "the_fool.jpg",
+    "The Magician": "the_magician.png",
+    "The High Priestess": "the_high_priestess.png",
+    "The Empress": "the_empress.png",
+    "The Emperor": "the_emperor.png",
+    "The Hierophant": "the_hierophant.png",
+    "The Lovers": "the_lovers.png",
+    "The Chariot": "the_chariot.png",
+    "Strength": "strength.png",
+    "The Hermit": "the_hermit.png",
+    "Wheel of Fortune": "wheel_of_fortune.png",
+    "Justice": "justice.png",
+    "The Hanged Man": "the_hanged_man.png",
+    "Death": "death.png",
+    "Temperance": "temperance.png",
+    "The Devil": "the_devil.png",
+    "The Tower": "the_tower.png",
+    "The Star": "the_star.png",
+    "The Moon": "the_moon.png",
+    "The Sun": "the_sun.png",
+    "Judgement": "judgement.png",
+    "The World": "the_world.png",
 }
 
 ANON_COLORS: list[int] = [
