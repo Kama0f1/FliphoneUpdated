@@ -95,7 +95,7 @@ def _anon_identity(seed: int) -> tuple[str, str]:
     if avatar_file:
         avatar = f"{config.ANON_AVATAR_BASE_URL.rstrip('/')}/{avatar_file}"
     else:
-        avatar = f"https://robohash.org/tarot-{seed}?set=set4&size=256x256"
+        avatar = f"https://robohash.org/{seed}?set=set4&size=256x256"
     return name, avatar
 
 
