@@ -867,6 +867,7 @@ class Room(commands.Cog):
                         ref_text = "image"
                     else:
                         ref_text = "message"
+                ref_text, _ = filter_message(ref_text)
                 ref_text = CUSTOM_EMOJI_PATTERN.sub("", ref_text).strip()
                 ref_text, _ = _limit_unicode_emojis(ref_text)
                 ref_text = _render_user_mentions(ref_text, message.guild)

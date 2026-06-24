@@ -106,10 +106,29 @@ _LEET_MAP = str.maketrans({
 def _normalise(text: str) -> str:
     return text.lower().translate(_LEET_MAP)
 
+def _fuzzy_word_pattern(word: str) -> str:
+    """
+    Build a conservative bypass-resistant pattern for one blocked token.
+
+    It catches light obfuscation such as repeated letters, punctuation, spaces,
+    or leet characters between letters, while still requiring token boundaries
+    so normal words are not matched just because they contain a blocked token.
+    """
+    chars: list[str] = []
+    for ch in word:
+        escaped = re.escape(ch)
+        if ch.isalnum():
+            chars.append(f"{escaped}+")
+        else:
+            chars.append(escaped)
+    return r"[\W_]*".join(chars)
+
 def _make_pattern(word: str) -> re.Pattern:
-    escaped = re.escape(_normalise(word))
-    escaped = re.sub(r"\\ ", r"\\s+", escaped)
-    return re.compile(r"(?<!\w)" + escaped + r"(?!\w)", re.IGNORECASE)
+    tokens = [token for token in _normalise(word).split() if token]
+    if not tokens:
+        return re.compile(r"(?!x)x")
+    escaped = r"[\W_]+".join(_fuzzy_word_pattern(token) for token in tokens)
+    return re.compile(r"(?<![a-z0-9])" + escaped + r"(?![a-z0-9])", re.IGNORECASE)
 
 def _build_patterns(words: list[str]) -> list[re.Pattern]:
     return [_make_pattern(w) for w in words]
