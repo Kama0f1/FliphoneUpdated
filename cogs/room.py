@@ -111,7 +111,7 @@ def _anon_identity(seed: int) -> tuple[str, str]:
     return name, avatar
 
 
-_ANON_NOTICE = "🎭 **Anon mode is ON** — other servers will see you as a tarot card identity."
+_ANON_NOTICE = "🎭 **Anon mode is ON**"
 
 
 def _get_avatar_url(member: discord.Member | discord.User) -> str:

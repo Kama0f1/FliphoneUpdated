@@ -354,7 +354,7 @@ _CONNECTED_MSG = (
     "To opt out, ask an admin to run `f.setup` in the channel to unconfigure it.*"
 )
 _ANON_NOTICE = (
-    "🎭 **Anon mode is ON** — other servers will see you as a tarot card identity."
+    "🎭 **Anon mode is ON**"
 )
 
 
