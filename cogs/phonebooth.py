@@ -91,7 +91,7 @@ def _elapsed_seconds(timestamp: Optional[str]) -> float:
 def _anon_identity(seed: int) -> tuple[str, str]:
     rng = random.Random(seed)
     name = rng.choice(config.ANON_NAMES)
-    avatar = f"https://robohash.org/{seed}?set=set4&size=256x256"
+    avatar = f"https://robohash.org/{seed}.png?set=set4&size=128x128"
     return name, avatar
 
 
