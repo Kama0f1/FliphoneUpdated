@@ -91,11 +91,7 @@ def _elapsed_seconds(timestamp: Optional[str]) -> float:
 def _anon_identity(seed: int) -> tuple[str, str]:
     rng = random.Random(seed)
     name = rng.choice(config.ANON_NAMES)
-    avatar_file = config.ANON_AVATARS.get(name)
-    if avatar_file:
-        avatar = f"{config.ANON_AVATAR_BASE_URL.rstrip('/')}/{avatar_file}"
-    else:
-        avatar = f"https://robohash.org/{seed}?set=set4&size=256x256"
+    avatar = f"https://robohash.org/{seed}?set=set4&size=256x256"
     return name, avatar
 
 
