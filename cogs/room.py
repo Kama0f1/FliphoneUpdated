@@ -54,18 +54,17 @@ ROOM_MAX_SIZE = 5
 ROOM_INACTIVITY_MINUTES = 10        # no relayed text/GIF → close the room
 ROOM_QUEUE_TIMEOUT_MINUTES = 10     # waiting room dissolves if nobody joins
 
-# Rate limiting — intentionally lax (people type fast).
-RL_MSGS   = 10      # messages allowed within the window
-RL_WINDOW = 15.0    # seconds
-RL_WARNS  = 3       # warnings before auto-kick for rate limiting
-
-# Flood detection — instant kick, no warning.
-FLOOD_MSGS   = 20
-FLOOD_WINDOW = 30.0
+# Rate limiting - dynamic per source channel so busy rooms get more headroom.
+RL_BASE_MSGS = 30
+RL_PER_EXTRA_SPEAKER = 15
+RL_MAX_MSGS = 120
+RL_WINDOW = 15.0
+RL_WARNS = 3
+WEBHOOK_REPAIR_ATTEMPTS = 2
 
 # Vote kick
 VK_DURATION = 60    # seconds the voting window stays open
-VK_COOLDOWN = 600   # seconds a kicked guild must wait before rejoining
+VK_COOLDOWN = 300   # seconds a kicked guild must wait before rejoining
 
 # Matches custom Discord emojis — <:name:id> and <a:name:id> (animated).
 # Stripped silently — they won't render in other servers.
@@ -293,7 +292,7 @@ class Room(commands.Cog):
         self.bot = bot
         self.db: Database = bot.db
 
-        # Rate-limiting: channel_id → deque of monotonic timestamps
+        # Rate-limiting: channel_id -> deque of (monotonic timestamp, user_id)
         self._msg_times:   dict[int, deque]   = {}
         # In-memory warn counts (reset when member leaves)
         self._warn_counts: dict[int, int]      = {}
@@ -374,18 +373,25 @@ class Room(commands.Cog):
 
     # ── Rate-limit / flood detection ──────────────────────────────────────────
 
-    def _check_rate(self, channel_id: int) -> tuple[bool, bool]:
-        """Returns (is_flooding, is_rate_limited)."""
+    @staticmethod
+    def _dynamic_rl_limit(active_speakers: int) -> int:
+        speakers = max(1, active_speakers)
+        return min(
+            RL_MAX_MSGS,
+            RL_BASE_MSGS + (speakers - 1) * RL_PER_EXTRA_SPEAKER,
+        )
+
+    def _check_rate(self, channel_id: int, user_id: int) -> tuple[bool, int, int, int]:
+        """Return (limited, count, limit, active_speakers) for this source channel."""
         now = time.monotonic()
         dq  = self._msg_times.setdefault(channel_id, deque())
-        dq.append(now)
-        # Prune anything older than the larger window
-        cutoff = now - max(RL_WINDOW, FLOOD_WINDOW)
-        while dq and dq[0] < cutoff:
+        dq.append((now, user_id))
+        cutoff = now - RL_WINDOW
+        while dq and dq[0][0] < cutoff:
             dq.popleft()
-        flood_count = sum(1 for t in dq if now - t <= FLOOD_WINDOW)
-        rl_count    = sum(1 for t in dq if now - t <= RL_WINDOW)
-        return flood_count >= FLOOD_MSGS, rl_count >= RL_MSGS
+        active_speakers = len({uid for _, uid in dq})
+        limit = self._dynamic_rl_limit(active_speakers)
+        return len(dq) > limit, len(dq), limit, active_speakers
 
     # ── Broadcast helper ──────────────────────────────────────────────────────
 
@@ -631,7 +637,7 @@ class Room(commands.Cog):
                         title="🔨 Removed from Room",
                         description=(
                             f"Your server was removed by {reason_str}.\n"
-                            f"You can rejoin rooms after a **10-minute cooldown**."
+                            f"You can rejoin rooms after a **5-minute cooldown**."
                         ),
                         color=config.COLOR_ERR,
                     )
@@ -721,6 +727,50 @@ class Room(commands.Cog):
         await self.db.update_webhook(channel.id, webhook_url)
         return webhook_url, []
 
+    async def rebuild_relay_webhook(
+        self,
+        channel: discord.TextChannel,
+    ) -> tuple[Optional[str], list[str]]:
+        phonebooth = self.bot.get_cog("Phonebooth")
+        if phonebooth and hasattr(phonebooth, "rebuild_relay_webhook"):
+            return await phonebooth.rebuild_relay_webhook(channel)
+
+        bot_member = channel.guild.me
+        if bot_member is None:
+            return None, ["Bot member unavailable"]
+        perms = channel.permissions_for(bot_member)
+        required = (
+            ("View Channel", perms.view_channel),
+            ("Send Messages", perms.send_messages),
+            ("Embed Links", perms.embed_links),
+            ("Read Message History", perms.read_message_history),
+            ("Manage Webhooks", perms.manage_webhooks),
+        )
+        issues = [name for name, allowed in required if not allowed]
+        if issues:
+            return None, issues
+
+        try:
+            webhooks = await channel.webhooks()
+            other_webhook_count = 0
+            for webhook in webhooks:
+                if webhook.user == self.bot.user and webhook.name == "Fliphone":
+                    await webhook.delete(reason="Fliphone room relay reset")
+                else:
+                    other_webhook_count += 1
+            if other_webhook_count >= 15:
+                return None, ["This channel already has Discord's maximum of 15 webhooks"]
+            webhook_url = (await channel.create_webhook(name="Fliphone")).url
+        except discord.Forbidden:
+            return None, ["Manage Webhooks"]
+        except discord.HTTPException as exc:
+            if exc.code == 30007:
+                return None, ["This channel already has Discord's maximum number of webhooks"]
+            return None, ["Discord webhook creation failed"]
+
+        await self.db.update_webhook(channel.id, webhook_url)
+        return webhook_url, []
+
     async def _send_webhook(
         self,
         url: str,
@@ -761,6 +811,61 @@ class Room(commands.Cog):
 
     # ── Message relay (one sender → all others) ───────────────────────────────
 
+    async def _send_room_webhook_with_repair(
+        self,
+        channel: Optional[discord.abc.GuildChannel],
+        member: dict,
+        webhook_url: Optional[str],
+        content: Optional[str],
+        username: str,
+        avatar_url: Optional[str],
+        files: list[discord.File],
+        *,
+        embed: Optional[discord.Embed] = None,
+        wait: bool = False,
+        silent: bool = False,
+    ) -> tuple[Optional[str], discord.WebhookMessage | bool | None]:
+        if webhook_url:
+            sent = await self._send_webhook(
+                webhook_url,
+                content,
+                username,
+                avatar_url,
+                files,
+                embed=embed,
+                wait=wait,
+                silent=silent,
+            )
+            if sent:
+                return webhook_url, sent
+
+        if not isinstance(channel, discord.TextChannel):
+            return webhook_url, None if wait else False
+
+        for attempt in range(WEBHOOK_REPAIR_ATTEMPTS):
+            repaired_url, _ = await self.rebuild_relay_webhook(channel)
+            if not repaired_url:
+                if attempt + 1 < WEBHOOK_REPAIR_ATTEMPTS:
+                    await asyncio.sleep(0.5)
+                continue
+
+            member["webhook_url"] = repaired_url
+            await self.db.update_room_member_webhook(member["channel_id"], repaired_url)
+            sent = await self._send_webhook(
+                repaired_url,
+                content,
+                username,
+                avatar_url,
+                files,
+                embed=embed,
+                wait=wait,
+                silent=silent,
+            )
+            if sent:
+                return repaired_url, sent
+
+        return webhook_url, None if wait else False
+
     async def _relay_to_room(
         self,
         message: discord.Message,
@@ -789,29 +894,21 @@ class Room(commands.Cog):
             return
 
         # ── Rate limit / flood check ──────────────────────────────────────────
-        is_flooded, is_rate_limited = self._check_rate(message.channel.id)
-
-        if is_flooded:
-            # Instant auto-kick, no vote needed
-            state = VoteKickState(
-                room_id=room["id"],
-                target_channel=message.channel.id,
-                target_station=member["station"],
-                target_guild=member["guild_id"],
-                initiator_channel=message.channel.id,
-                total_members=len(members),
-            )
-            await self._execute_kick(state, by_vote=False)
-            return
+        is_rate_limited, _, cap, speakers = self._check_rate(
+            message.channel.id,
+            message.author.id,
+        )
 
         if is_rate_limited:
             warn = self._warn_counts.get(message.channel.id, 0) + 1
             self._warn_counts[message.channel.id] = warn
             try:
                 await message.channel.send(
-                    f"⚠️ Slow down — you're sending messages too fast. "
+                    f"{message.author.mention} This channel is sending messages too fast "
+                    f"for this room. Current cap: **{cap}/{int(RL_WINDOW)}s** "
+                    f"with **{speakers}** active speaker(s). "
                     f"(Warning **{warn}/{RL_WARNS}**)",
-                    delete_after=6,
+                    delete_after=8,
                 )
             except discord.HTTPException:
                 pass
@@ -826,6 +923,7 @@ class Room(commands.Cog):
                 )
                 await self._execute_kick(state, by_vote=False)
             return
+        self._warn_counts.pop(message.channel.id, None)
 
         # ── Identity ──────────────────────────────────────────────────────────
         if anon:
@@ -1079,25 +1177,9 @@ class Room(commands.Cog):
 
             sent_msg_id: Optional[int] = None
 
-            if not wh_url and isinstance(other_ch, discord.TextChannel):
-                wh_url, _ = await self.ensure_relay_webhook(other_ch)
-                if wh_url:
-                    other["webhook_url"] = wh_url
-                    await self.db.update_room_member_webhook(other["channel_id"], wh_url)
-
-            if not wh_url:
-                if other_ch and other["channel_id"] not in self._broken_webhook_notified:
-                    try:
-                        await other_ch.send(
-                            "⚠️ Room relay is paused for this server because its webhook is unavailable. "
-                            "An admin should run `f.repair` in this channel."
-                        )
-                        self._broken_webhook_notified.add(other["channel_id"])
-                    except discord.HTTPException:
-                        pass
-                continue
-
-            wh_msg = await self._send_webhook(
+            wh_url, wh_msg = await self._send_room_webhook_with_repair(
+                other_ch,
+                other,
                 wh_url,
                 recipient_text_content,
                 webhook_name,
@@ -1107,25 +1189,6 @@ class Room(commands.Cog):
                 wait=True,
                 silent=bool(recipient_gif_urls),
             )
-            if not wh_msg and isinstance(other_ch, discord.TextChannel):
-                repaired_url, _ = await self.ensure_relay_webhook(
-                    other_ch,
-                    force_refresh=True,
-                )
-                if repaired_url:
-                    wh_url = repaired_url
-                    other["webhook_url"] = repaired_url
-                    await self.db.update_room_member_webhook(other["channel_id"], repaired_url)
-                    wh_msg = await self._send_webhook(
-                        wh_url,
-                        recipient_text_content,
-                        webhook_name,
-                        avatar_url,
-                        send_files,
-                        embed=recipient_reply_embed,
-                        wait=True,
-                        silent=bool(recipient_gif_urls),
-                    )
             if not wh_msg:
                 if other_ch and other["channel_id"] not in self._broken_webhook_notified:
                     try:

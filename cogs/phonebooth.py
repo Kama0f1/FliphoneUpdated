@@ -369,10 +369,10 @@ class Phonebooth(commands.Cog):
         self._call_reported_gifs: dict[int, set[str]] = {}
         # conn_id -> asyncio.Task for inactivity timeout
         self._inactivity_tasks: dict[int, asyncio.Task] = {}
-        # Rate limiting: channel_id -> deque of monotonic send timestamps
-        # Lax: 10 messages per 15 s; after 3 warnings the message is silently dropped
+        # Rate limiting: channel_id -> deque of (monotonic timestamp, user_id)
         self._rl_times: dict[int, deque] = {}
         self._rl_warns: dict[int, int]   = {}
+        self._call_rate_cooldowns: dict[int, float] = {}
         # guild_id -> last call info, used by report.py to identify partner after hangup/skip
         self._last_calls: dict[int, dict] = {}
         self._conn_by_channel: dict[int, dict] = {}
@@ -706,26 +706,45 @@ class Phonebooth(commands.Cog):
             )
 
     # ── Rate limiting (1:1 calls) ─────────────────────────────────────────────
-    # Lax settings: 10 messages per 15-second rolling window.
-    # 3 warnings are shown before messages start being silently dropped.
-
-    _RL_MSGS   = 10
+    _RL_BASE_MSGS = 30
+    _RL_PER_EXTRA_SPEAKER = 15
+    _RL_MAX_MSGS = 120
     _RL_WINDOW = 15.0
     _RL_WARN_MAX = 3
+    _CALL_RL_COOLDOWN_SECONDS = 5 * 60
+    _WEBHOOK_REPAIR_ATTEMPTS = 2
 
-    def _call_is_rate_limited(self, channel_id: int) -> bool:
-        """Return True if this channel is sending too fast."""
+    @staticmethod
+    def _dynamic_rl_limit(active_speakers: int) -> int:
+        speakers = max(1, active_speakers)
+        return min(
+            Phonebooth._RL_MAX_MSGS,
+            Phonebooth._RL_BASE_MSGS + (speakers - 1) * Phonebooth._RL_PER_EXTRA_SPEAKER,
+        )
+
+    def _check_call_rate_limit(self, channel_id: int, user_id: int) -> tuple[bool, int, int, int]:
+        """Return (limited, count, limit, active_speakers) for this source channel."""
         now = time.monotonic()
         dq  = self._rl_times.setdefault(channel_id, deque())
-        dq.append(now)
+        dq.append((now, user_id))
         cutoff = now - self._RL_WINDOW
-        while dq and dq[0] < cutoff:
+        while dq and dq[0][0] < cutoff:
             dq.popleft()
-        return len(dq) > self._RL_MSGS
+        active_speakers = len({uid for _, uid in dq})
+        limit = self._dynamic_rl_limit(active_speakers)
+        return len(dq) > limit, len(dq), limit, active_speakers
 
     def _clear_rl_state(self, channel_id: int) -> None:
         self._rl_times.pop(channel_id, None)
         self._rl_warns.pop(channel_id, None)
+
+    def _call_cooldown_remaining(self, channel_id: int) -> int:
+        expiry = self._call_rate_cooldowns.get(channel_id, 0.0)
+        remaining = int(expiry - time.monotonic())
+        if remaining <= 0:
+            self._call_rate_cooldowns.pop(channel_id, None)
+            return 0
+        return remaining
 
     @tasks.loop(minutes=5)
     async def _cleanup_loop(self) -> None:
@@ -1013,6 +1032,67 @@ class Phonebooth(commands.Cog):
         finally:
             self._ending_broken_connections.discard(conn_id)
 
+    async def _end_rate_limited_connection(
+        self,
+        conn: dict,
+        offender_channel_id: int,
+        offender_user_id: int,
+    ) -> None:
+        """End a call and apply the 5-minute call cooldown to one source channel."""
+        conn_id = int(conn["id"])
+        current = await self.db.get_connection(conn["channel_a"])
+        if not current or int(current["id"]) != conn_id:
+            return
+
+        self._call_rate_cooldowns[offender_channel_id] = (
+            time.monotonic() + self._CALL_RL_COOLDOWN_SECONDS
+        )
+        self._last_calls[conn["guild_a"]] = {
+            "other_guild_id": conn["guild_b"],
+            "started_at": conn["started_at"],
+            "ended_at": datetime.utcnow().isoformat(),
+            "active": False,
+            "conn_id": conn["id"],
+        }
+        self._last_calls[conn["guild_b"]] = {
+            "other_guild_id": conn["guild_a"],
+            "started_at": conn["started_at"],
+            "ended_at": datetime.utcnow().isoformat(),
+            "active": False,
+            "conn_id": conn["id"],
+        }
+        await self.db.remove_connection(conn_id, ended_by=offender_user_id)
+        self._invalidate_connection(conn)
+        self._call_reported_gifs.pop(conn_id, None)
+        self._cancel_inactivity(conn_id)
+        self._clear_rl_state(conn["channel_a"])
+        self._clear_rl_state(conn["channel_b"])
+        report_cog = self.bot.get_cog("Report")
+        if report_cog:
+            report_cog.clear_log(conn_id)
+
+        other_channel_id = (
+            conn["channel_b"] if offender_channel_id == conn["channel_a"] else conn["channel_a"]
+        )
+        offender_channel = self.bot.get_channel(offender_channel_id)
+        if offender_channel:
+            try:
+                await offender_channel.send(
+                    "Call ended because this channel hit the relay rate limit.\n"
+                    "You can start another 1:1 call in 5 minutes."
+                )
+            except discord.HTTPException:
+                pass
+        other_channel = self.bot.get_channel(other_channel_id)
+        if other_channel:
+            try:
+                await other_channel.send(
+                    "The other server hit the relay rate limit, so the call ended.\n"
+                    "Use `f.call` to start another call."
+                )
+            except discord.HTTPException:
+                pass
+
     async def _send_webhook(
         self,
         url: str,
@@ -1070,14 +1150,7 @@ class Phonebooth(commands.Cog):
         # A failed webhook can still appear in channel.webhooks(), so merely
         # refreshing it may return the same unusable token. Rebuild it exactly
         # as f.repair does, but without tearing down the active call.
-        webhook_url = None
-        repair_issues: list[str] = []
-        for attempt in range(2):
-            webhook_url, repair_issues = await self.rebuild_relay_webhook(channel)
-            if webhook_url:
-                break
-            if attempt == 0 and not self.relay_permission_issues(channel):
-                await asyncio.sleep(0.5)
+        webhook_url, repair_issues = await self.rebuild_relay_webhook(channel)
         if not webhook_url:
             print(
                 f"[relay-webhook-repair] channel={channel.id} failed: "
@@ -1094,6 +1167,59 @@ class Phonebooth(commands.Cog):
         return webhook_url
 
     # ── Message relay ─────────────────────────────────────────────────────────
+
+    async def _send_call_webhook_with_repair(
+        self,
+        target_channel: Optional[discord.abc.GuildChannel],
+        conn: dict,
+        webhook_url: Optional[str],
+        content: Optional[str],
+        username: str,
+        avatar_url: Optional[str],
+        files: list[discord.File],
+        *,
+        reply_embed: Optional[discord.Embed] = None,
+        wait: bool = False,
+        silent: bool = False,
+    ) -> discord.WebhookMessage | bool | None:
+        if webhook_url:
+            sent = await self._send_webhook(
+                webhook_url,
+                content,
+                username,
+                avatar_url,
+                files,
+                reply_embed=reply_embed,
+                wait=wait,
+                silent=silent,
+            )
+            if sent:
+                return sent
+
+        if not isinstance(target_channel, discord.TextChannel):
+            return None if wait else False
+
+        for attempt in range(self._WEBHOOK_REPAIR_ATTEMPTS):
+            repaired_url = await self._repair_relay_webhook(target_channel, conn)
+            if not repaired_url:
+                if attempt + 1 < self._WEBHOOK_REPAIR_ATTEMPTS:
+                    await asyncio.sleep(0.5)
+                continue
+
+            sent = await self._send_webhook(
+                repaired_url,
+                content,
+                username,
+                avatar_url,
+                files,
+                reply_embed=reply_embed,
+                wait=wait,
+                silent=silent,
+            )
+            if sent:
+                return sent
+
+        return None if wait else False
 
     async def _relay(self, message: discord.Message, conn: dict) -> None:
         is_side_a  = message.channel.id == conn["channel_a"]
@@ -1119,19 +1245,32 @@ class Phonebooth(commands.Cog):
             await self.db.set_gif_report_prompt(report_id, prompt.id, prompt.channel.id)
 
         # ── Rate limiting (sync — no DB needed) ──────────────────────────────
-        if self._call_is_rate_limited(message.channel.id):
+        is_rate_limited, _, cap, speakers = self._check_call_rate_limit(
+            message.channel.id,
+            message.author.id,
+        )
+        if is_rate_limited:
             warn = self._rl_warns.get(message.channel.id, 0) + 1
             self._rl_warns[message.channel.id] = warn
             if warn <= self._RL_WARN_MAX:
                 try:
                     await message.channel.send(
-                        f"⚠️ {message.author.mention} You're sending messages too fast — "
-                        f"slow down a little! (Warning **{warn}/{self._RL_WARN_MAX}**)",
-                        delete_after=6,
+                        f"{message.author.mention} This channel is sending messages too fast "
+                        f"for this call. Current cap: **{cap}/{int(self._RL_WINDOW)}s** "
+                        f"with **{speakers}** active speaker(s). "
+                        f"(Warning **{warn}/{self._RL_WARN_MAX}**)",
+                        delete_after=8,
                     )
                 except discord.HTTPException:
                     pass
+            if warn >= self._RL_WARN_MAX:
+                await self._end_rate_limited_connection(
+                    conn,
+                    message.channel.id,
+                    message.author.id,
+                )
             return
+        self._rl_warns.pop(message.channel.id, None)
 
         # ── Ban check + config fetch in parallel ──────────────────────────────
         is_banned, anon = await self._get_user_relay_policy(message.author.id)
@@ -1370,48 +1509,44 @@ class Phonebooth(commands.Cog):
         need_id = bool(reportable_gif_urls)
         target_channel = self.bot.get_channel(target_cid)
 
-        if not target_wh and target_channel:
-            target_wh = await self._repair_relay_webhook(target_channel, conn)
-
-        if target_wh:
-            main_wh_msg = await self._send_webhook(
-                target_wh, text_content, display_name, avatar_url, files,
-                reply_embed=reply_embed, wait=True, silent=bool(reportable_gif_urls),
-            )
-            if not main_wh_msg and target_channel:
-                repaired_wh = await self._repair_relay_webhook(target_channel, conn)
-                if repaired_wh:
-                    target_wh = repaired_wh
-                    main_wh_msg = await self._send_webhook(
-                        target_wh, text_content, display_name, avatar_url, files,
-                        reply_embed=reply_embed, wait=True, silent=bool(reportable_gif_urls),
-                    )
-            if main_wh_msg:
-                self._reaction_routes[(message.channel.id, message.id)] = (target_cid, main_wh_msg.id)
-                self._reaction_routes[(target_cid, main_wh_msg.id)] = (message.channel.id, message.id)
-                asyncio.create_task(
-                    self.db.add_chat_xp(
-                        message.author.id,
-                        message.guild.id,
-                        random.randint(CHAT_XP_MIN, CHAT_XP_MAX),
-                        CHAT_XP_COOLDOWN_SECONDS,
-                    )
+        main_wh_msg = await self._send_call_webhook_with_repair(
+            target_channel,
+            conn,
+            target_wh,
+            text_content,
+            display_name,
+            avatar_url,
+            files,
+            reply_embed=reply_embed,
+            wait=True,
+            silent=bool(reportable_gif_urls),
+        )
+        if main_wh_msg:
+            self._reaction_routes[(message.channel.id, message.id)] = (target_cid, main_wh_msg.id)
+            self._reaction_routes[(target_cid, main_wh_msg.id)] = (message.channel.id, message.id)
+            asyncio.create_task(
+                self.db.add_chat_xp(
+                    message.author.id,
+                    message.guild.id,
+                    random.randint(CHAT_XP_MIN, CHAT_XP_MAX),
+                    CHAT_XP_COOLDOWN_SECONDS,
                 )
-                # GIF report cards
-                if reportable_gif_urls:
-                    target_ch = self.bot.get_channel(target_cid)
-                    if target_ch:
-                        report_tasks = [
-                            _send_gif_report_card(
-                                target_ch,
-                                gif_url,
-                                main_wh_msg.id,
-                            )
-                            for gif_url in reportable_gif_urls
-                        ]
-                        if report_tasks:
-                            await asyncio.gather(*report_tasks, return_exceptions=True)
-                return
+            )
+            # GIF report cards
+            if reportable_gif_urls:
+                target_ch = self.bot.get_channel(target_cid)
+                if target_ch:
+                    report_tasks = [
+                        _send_gif_report_card(
+                            target_ch,
+                            gif_url,
+                            main_wh_msg.id,
+                        )
+                        for gif_url in reportable_gif_urls
+                    ]
+                    if report_tasks:
+                        await asyncio.gather(*report_tasks, return_exceptions=True)
+            return
 
         await self._end_broken_connection(conn)
 
@@ -1497,6 +1632,13 @@ class Phonebooth(commands.Cog):
             return
         if guild_banned:
             await ctx.send("🚫 This server is banned from using Fliphone.")
+            return
+        cooldown_remaining = self._call_cooldown_remaining(ctx.channel.id)
+        if cooldown_remaining:
+            await ctx.send(
+                "This channel is on a 1:1 call cooldown for another "
+                f"**{cooldown_remaining // 60}m {cooldown_remaining % 60}s**."
+            )
             return
 
         if not cfg:
@@ -1646,6 +1788,13 @@ class Phonebooth(commands.Cog):
         cfg = await self._get_guild_config_cached(ctx.guild.id)
         if not cfg:
             await ctx.send("❌ Fliphone isn't set up. An admin should run `f.setup` once in this server.")
+            return
+        cooldown_remaining = self._call_cooldown_remaining(ctx.channel.id)
+        if cooldown_remaining:
+            await ctx.send(
+                "This channel is on a 1:1 call cooldown for another "
+                f"**{cooldown_remaining // 60}m {cooldown_remaining % 60}s**."
+            )
             return
 
         conn = await self._get_connection_cached(ctx.channel.id)
