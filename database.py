@@ -1431,6 +1431,8 @@ class Database:
                 )
                 return int(existing["id"]), "pending"
             if status == "pending":
+                if existing.get("review_msg_id") is None:
+                    return int(existing["id"]), "pending"
                 return int(existing["id"]), "already_pending"
             return int(existing["id"]), status
 
