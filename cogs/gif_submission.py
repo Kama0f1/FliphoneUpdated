@@ -566,8 +566,8 @@ class GifSubmission(commands.Cog):
             return
         self._captures[(ctx.author.id, ctx.channel.id)] = (time.monotonic() + CAPTURE_SECONDS, "emoji")
         await ctx.send(
-            f"Send up to {MAX_EMOJIS_PER_SUBMISSION} custom server emojis in this channel within 60 seconds. "
-            "They will stay local and will not be relayed."
+            f"Send **one message** with up to {MAX_EMOJIS_PER_SUBMISSION} custom server emojis "
+            "in this channel within 60 seconds. They will stay local and will not be relayed."
         )
 
     @commands.command(name="emojicleanup")

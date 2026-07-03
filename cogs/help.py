@@ -20,7 +20,7 @@ CALL_COMMANDS = [
     ("anon", "f.anon", "Toggle your tarot anon identity."),
     ("notify", "f.notify", "Toggle queue notification DMs."),
     ("addgif", "f.addgif", "Submit a GIF for safe relay approval. Burst limits still apply."),
-    ("addemoji", "f.addemoji", "Submit up to 5 custom server emojis for review."),
+    ("addemoji", "f.addemoji", "Submit one message with up to 5 custom server emojis for review."),
     ("report", "f.report", "Report the active or most recent conversation."),
     ("profile", "f.profile", "Show your level, XP, ranks, and banner."),
     ("banner", "f.banner", "Reroll your profile banner."),
