@@ -553,7 +553,7 @@ class GifSubmission(commands.Cog):
             "It will stay local and will not be relayed."
         )
 
-    @commands.hybrid_command(name="addemoji", aliases=["addemote", "submitemoji"])
+    @commands.hybrid_command(name="addemoji", aliases=["addemojis", "addemote", "submitemoji"])
     @commands.guild_only()
     @commands.cooldown(1, 30, commands.BucketType.user)
     async def addemoji(self, ctx: commands.Context) -> None:

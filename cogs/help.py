@@ -78,6 +78,7 @@ PUBLIC_ALIASES = {
     "s": "skip",
     "fr": "friendrequest",
     "notifications": "notify",
+    "addemojis": "addemoji",
     "addemote": "addemoji",
     "submitemoji": "addemoji",
     "r": "room",
