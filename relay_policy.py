@@ -90,7 +90,7 @@ async def replace_approved_custom_emojis(content: str, db: object) -> tuple[str,
         if original_id not in seen_used:
             used_ids.append(original_id)
             seen_used.add(original_id)
-        prefix = "a" if _is_animated(row.get("animated")) else ""
+        prefix = "a" if _is_animated(row.get("app_emoji_animated")) else ""
         name = str(row.get("app_emoji_name") or row.get("original_name") or match.group("name"))
         return f"<{prefix}:{name}:{int(row['app_emoji_id'])}>"
 

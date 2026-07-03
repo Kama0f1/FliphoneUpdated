@@ -204,20 +204,27 @@ class EmojiSubmissionReviewView(discord.ui.View):
         except ValueError:
             return None
 
-    async def _fetch_emoji_image(self, bot: commands.Bot, submission: dict) -> bytes:
-        url = custom_emoji_asset_url(
-            int(submission["original_emoji_id"]),
-            _truthy_flag(submission["animated"]),
-        )
+    async def _fetch_emoji_image(self, bot: commands.Bot, submission: dict) -> tuple[bytes, bool]:
+        emoji_id = int(submission["original_emoji_id"])
+        animated = _truthy_flag(submission["animated"])
+        candidates: list[tuple[str, bool]] = []
+        if animated:
+            candidates.append((custom_emoji_asset_url(emoji_id, True), True))
+        candidates.append((custom_emoji_asset_url(emoji_id, False), False))
+
         session = getattr(bot, "http_session", None)
         own_session = session is None or session.closed
         if own_session:
             session = aiohttp.ClientSession()
+        errors: list[str] = []
         try:
-            async with session.get(url) as response:
-                if response.status >= 400:
-                    raise RuntimeError(f"Discord CDN returned HTTP {response.status}")
-                return await response.read()
+            for url, image_is_animated in candidates:
+                async with session.get(url) as response:
+                    if response.status >= 400:
+                        errors.append(f"{url} -> HTTP {response.status}")
+                        continue
+                    return await response.read(), image_is_animated
+            raise RuntimeError("; ".join(errors) or "Discord CDN did not return an emoji image")
         finally:
             if own_session:
                 await session.close()
@@ -264,10 +271,11 @@ class EmojiSubmissionReviewView(discord.ui.View):
 
         app_emoji_id = None
         app_emoji_name = None
+        app_emoji_animated = False
         app_emoji = None
         if action == "approved":
             try:
-                image = await self._fetch_emoji_image(interaction.client, submission)
+                image, image_is_animated = await self._fetch_emoji_image(interaction.client, submission)
                 app_name = _safe_app_emoji_name(
                     str(submission["original_name"]),
                     int(submission["original_emoji_id"]),
@@ -278,6 +286,7 @@ class EmojiSubmissionReviewView(discord.ui.View):
                 )
                 app_emoji_id = int(app_emoji.id)
                 app_emoji_name = app_emoji.name
+                app_emoji_animated = bool(getattr(app_emoji, "animated", image_is_animated))
             except (discord.HTTPException, aiohttp.ClientError, RuntimeError) as exc:
                 await interaction.followup.send(
                     "Could not mirror this emoji into Fliphone's application emojis. "
@@ -292,6 +301,7 @@ class EmojiSubmissionReviewView(discord.ui.View):
             action,
             app_emoji_id=app_emoji_id,
             app_emoji_name=app_emoji_name,
+            app_emoji_animated=app_emoji_animated,
         )
         if not reviewed:
             if app_emoji is not None:
@@ -310,8 +320,10 @@ class EmojiSubmissionReviewView(discord.ui.View):
         }[action]
         decision = f"{action.title()} by {interaction.user.mention}"
         if app_emoji_id:
-            prefix = "a" if _truthy_flag(submission["animated"]) else ""
+            prefix = "a" if app_emoji_animated else ""
             decision += f"\nMirrored as `<{prefix}:{app_emoji_name}:{app_emoji_id}>`"
+            if _truthy_flag(submission["animated"]) and not app_emoji_animated:
+                decision += "\nDiscord only provided a static copy, so this will relay as a static emoji."
         embed.add_field(name="Decision", value=decision, inline=False)
         await self._finish_review(
             interaction,
@@ -479,7 +491,7 @@ class GifSubmission(commands.Cog):
         embed.add_field(name="Animated", value="Yes" if emoji.animated else "No", inline=True)
         embed.add_field(name="Submitted by", value=f"{message.author} (`{message.author.id}`)", inline=False)
         embed.add_field(name="Server / channel", value=f"{message.guild.name} / {message.channel.mention}", inline=False)
-        embed.set_image(url=custom_emoji_asset_url(emoji.emoji_id, emoji.animated))
+        embed.set_image(url=custom_emoji_asset_url(emoji.emoji_id, False))
         embed.set_footer(text=f"Emoji Submission #{submission_id}")
         review_message = await review_channel.send(embed=embed, view=EmojiSubmissionReviewView())
         await self.db.set_emoji_submission_review_message(submission_id, review_message.id)

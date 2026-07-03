@@ -250,6 +250,7 @@ CREATE TABLE IF NOT EXISTS emoji_submissions (
     animated          INTEGER NOT NULL DEFAULT 0,
     app_emoji_id      INTEGER,
     app_emoji_name    TEXT,
+    app_emoji_animated INTEGER NOT NULL DEFAULT 0,
     submitter_id      INTEGER NOT NULL,
     guild_id          INTEGER NOT NULL,
     channel_id        INTEGER NOT NULL,
@@ -499,6 +500,7 @@ CREATE TABLE IF NOT EXISTS emoji_submissions (
     animated          INTEGER NOT NULL DEFAULT 0,
     app_emoji_id      BIGINT,
     app_emoji_name    TEXT,
+    app_emoji_animated INTEGER NOT NULL DEFAULT 0,
     submitter_id      BIGINT NOT NULL,
     guild_id          BIGINT NOT NULL,
     channel_id        BIGINT NOT NULL,
@@ -714,10 +716,21 @@ class Database:
             ("gif_reports", "review_channel_id", "BIGINT" if self.backend == "postgres" else "INTEGER"),
             ("call_reports", "review_msg_id", "BIGINT" if self.backend == "postgres" else "INTEGER"),
             ("call_reports", "review_channel_id", "BIGINT" if self.backend == "postgres" else "INTEGER"),
+            ("emoji_submissions", "app_emoji_animated", "INTEGER NOT NULL DEFAULT 0"),
         )
         for table, column, sql_type in optional_columns:
             if not await self._has_column(table, column):
                 await self._execute(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}")
+        await self._execute(
+            """
+            UPDATE emoji_submissions
+            SET app_emoji_animated = animated
+            WHERE status = 'approved'
+              AND app_emoji_id IS NOT NULL
+              AND app_emoji_animated = 0
+              AND animated <> 0
+            """
+        )
 
     async def _execute(self, sql: str, params: Sequence[Any] = ()) -> int:
         if self.backend == "postgres":
@@ -1413,10 +1426,10 @@ class Database:
                     """
                     UPDATE emoji_submissions
                     SET original_name = ?, animated = ?, app_emoji_id = NULL,
-                        app_emoji_name = NULL, submitter_id = ?, guild_id = ?,
-                        channel_id = ?, status = 'pending', review_msg_id = NULL,
-                        created_at = ?, reviewed_at = NULL, last_used_at = NULL,
-                        use_count = 0
+                        app_emoji_name = NULL, app_emoji_animated = 0,
+                        submitter_id = ?, guild_id = ?, channel_id = ?,
+                        status = 'pending', review_msg_id = NULL, created_at = ?,
+                        reviewed_at = NULL, last_used_at = NULL, use_count = 0
                     WHERE id = ?
                     """,
                     (
@@ -1482,6 +1495,7 @@ class Database:
         *,
         app_emoji_id: Optional[int] = None,
         app_emoji_name: Optional[str] = None,
+        app_emoji_animated: bool = False,
     ) -> Optional[dict]:
         if action not in {"approved", "rejected", "blacklisted"}:
             raise ValueError("Invalid emoji review action")
@@ -1491,7 +1505,8 @@ class Database:
         updated = await self._execute(
             """
             UPDATE emoji_submissions
-            SET status = ?, reviewed_at = ?, app_emoji_id = ?, app_emoji_name = ?
+            SET status = ?, reviewed_at = ?, app_emoji_id = ?, app_emoji_name = ?,
+                app_emoji_animated = ?
             WHERE id = ? AND status = 'pending'
             """,
             (
@@ -1499,6 +1514,7 @@ class Database:
                 datetime.utcnow().isoformat(),
                 app_emoji_id,
                 app_emoji_name,
+                1 if app_emoji_animated else 0,
                 submission_id,
             ),
         )
