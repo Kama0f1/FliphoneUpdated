@@ -61,6 +61,11 @@ def custom_emoji_asset_url(emoji_id: int, animated: bool) -> str:
     return f"https://cdn.discordapp.com/emojis/{int(emoji_id)}.{ext}"
 
 
+def custom_emoji_preview_url(emoji_id: int, animated: bool) -> str:
+    suffix = "?animated=true&size=128&quality=lossless" if animated else "?size=128&quality=lossless"
+    return f"https://cdn.discordapp.com/emojis/{int(emoji_id)}.webp{suffix}"
+
+
 def downgrade_animated_custom_emoji_markup(content: str) -> tuple[str, list[int]]:
     app_emoji_ids: list[int] = []
 

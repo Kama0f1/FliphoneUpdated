@@ -17,6 +17,7 @@ import config
 from relay_policy import (
     CustomEmojiCandidate,
     custom_emoji_asset_url,
+    custom_emoji_preview_url,
     extract_custom_emojis,
     extract_gif_candidate,
 )
@@ -499,7 +500,7 @@ class GifSubmission(commands.Cog):
         embed.add_field(name="Animated", value="Yes" if emoji.animated else "No", inline=True)
         embed.add_field(name="Submitted by", value=f"{message.author} (`{message.author.id}`)", inline=False)
         embed.add_field(name="Server / channel", value=f"{message.guild.name} / {message.channel.mention}", inline=False)
-        embed.set_image(url=custom_emoji_asset_url(emoji.emoji_id, False))
+        embed.set_image(url=custom_emoji_preview_url(emoji.emoji_id, emoji.animated))
         embed.set_footer(text=f"Emoji Submission #{submission_id}")
         review_message = await review_channel.send(embed=embed, view=EmojiSubmissionReviewView())
         await self.db.set_emoji_submission_review_message(submission_id, review_message.id)
