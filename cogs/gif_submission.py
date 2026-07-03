@@ -209,7 +209,15 @@ class EmojiSubmissionReviewView(discord.ui.View):
         animated = _truthy_flag(submission["animated"])
         candidates: list[tuple[str, bool]] = []
         if animated:
+            candidates.append((
+                f"https://cdn.discordapp.com/emojis/{emoji_id}.webp?animated=true&size=128&quality=lossless",
+                True,
+            ))
             candidates.append((custom_emoji_asset_url(emoji_id, True), True))
+        candidates.append((
+            f"https://cdn.discordapp.com/emojis/{emoji_id}.webp?size=128&quality=lossless",
+            False,
+        ))
         candidates.append((custom_emoji_asset_url(emoji_id, False), False))
 
         session = getattr(bot, "http_session", None)
