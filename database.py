@@ -1566,6 +1566,21 @@ class Database:
         )
         return {int(row["app_emoji_id"]): row for row in rows}
 
+    async def mark_app_emojis_static(self, app_emoji_ids: Sequence[int]) -> None:
+        ids = [int(value) for value in dict.fromkeys(app_emoji_ids)]
+        if not ids:
+            return
+        placeholders = ", ".join("?" for _ in ids)
+        await self._execute(
+            f"""
+            UPDATE emoji_submissions
+            SET app_emoji_animated = 0
+            WHERE app_emoji_id IN ({placeholders})
+              AND status = 'approved'
+            """,
+            tuple(ids),
+        )
+
     async def increment_emoji_usage(self, original_emoji_ids: Sequence[int]) -> None:
         ids = [int(value) for value in dict.fromkeys(original_emoji_ids)]
         if not ids:

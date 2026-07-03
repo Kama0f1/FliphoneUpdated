@@ -31,10 +31,12 @@ import config
 from database import Database
 from filter import filter_message
 from relay_policy import (
+    downgrade_animated_custom_emoji_markup,
     extract_urls,
     is_direct_gif_url,
     is_local_only,
     is_provider_gif,
+    plain_custom_emoji_fallback,
     replace_approved_custom_emojis,
 )
 
@@ -1118,21 +1120,129 @@ class Phonebooth(commands.Cog):
             if wh is None:
                 wh = discord.Webhook.from_url(url, session=session)
                 self._wh_obj_cache[url] = wh
+
+            async def _send_once(
+                send_content: Optional[str],
+                send_embed: Optional[discord.Embed],
+                *,
+                send_avatar_url: Optional[str] = avatar_url,
+            ) -> discord.WebhookMessage | bool:
+                msg = await wh.send(
+                    content=send_content or None,
+                    username=username[:80],
+                    avatar_url=send_avatar_url,
+                    embeds=[send_embed] if send_embed else discord.utils.MISSING,
+                    files=files if files else discord.utils.MISSING,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                    silent=silent,
+                    wait=wait,
+                )
+                return msg if wait else True
+
+            msg = await _send_once(content, reply_embed)
+            return msg if wait else True
+        except discord.HTTPException as exc:
+            status = getattr(exc, "status", None)
+            if status == 400:
+                fallback = await self._send_webhook_bad_content_fallback(
+                    wh,
+                    content,
+                    username,
+                    avatar_url,
+                    files,
+                    reply_embed=reply_embed,
+                    wait=wait,
+                    silent=silent,
+                )
+                if fallback:
+                    return fallback
+                print(f"[relay-webhook-content] status={status} code={getattr(exc, 'code', None)} {exc}")
+                return None if wait else False
+            print(f"[relay-webhook] status={status} code={getattr(exc, 'code', None)} {exc}")
+            self._invalidate_webhook_url(url)
+            return None if wait else False
+        except Exception as exc:
+            print(f"[relay-webhook] {exc}")
+            self._invalidate_webhook_url(url)
+            return None if wait else False
+
+    async def _send_webhook_bad_content_fallback(
+        self,
+        wh: discord.Webhook,
+        content: Optional[str],
+        username: str,
+        avatar_url: Optional[str],
+        files: list[discord.File],
+        *,
+        reply_embed: Optional[discord.Embed] = None,
+        wait: bool = False,
+        silent: bool = False,
+    ) -> discord.WebhookMessage | bool | None:
+        def _downgrade_embed(embed: Optional[discord.Embed]) -> tuple[Optional[discord.Embed], list[int]]:
+            if not embed or not embed.description:
+                return embed, []
+            updated, ids = downgrade_animated_custom_emoji_markup(embed.description)
+            if not ids:
+                return embed, []
+            clone = embed.copy()
+            clone.description = updated
+            return clone, ids
+
+        downgraded_content, content_ids = downgrade_animated_custom_emoji_markup(content or "")
+        downgraded_embed, embed_ids = _downgrade_embed(reply_embed)
+        if content_ids or embed_ids:
+            try:
+                msg = await wh.send(
+                    content=downgraded_content or None,
+                    username=username[:80],
+                    avatar_url=avatar_url,
+                    embeds=[downgraded_embed] if downgraded_embed else discord.utils.MISSING,
+                    files=files if files else discord.utils.MISSING,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                    silent=silent,
+                    wait=wait,
+                )
+                asyncio.create_task(self.db.mark_app_emojis_static(content_ids + embed_ids))
+                return msg if wait else True
+            except discord.HTTPException:
+                pass
+
+        plain_content = plain_custom_emoji_fallback(content or "").strip()
+        plain_embed = reply_embed
+        if reply_embed and reply_embed.description:
+            plain_embed = reply_embed.copy()
+            plain_embed.description = plain_custom_emoji_fallback(reply_embed.description).strip() or "emoji"
+        if not plain_content and not plain_embed and not files:
+            plain_content = "emoji"
+        try:
             msg = await wh.send(
-                content=content or None,
+                content=plain_content or None,
                 username=username[:80],
                 avatar_url=avatar_url,
-                embeds=[reply_embed] if reply_embed else discord.utils.MISSING,
+                embeds=[plain_embed] if plain_embed else discord.utils.MISSING,
                 files=files if files else discord.utils.MISSING,
                 allowed_mentions=discord.AllowedMentions.none(),
                 silent=silent,
                 wait=wait,
             )
             return msg if wait else True
-        except Exception as exc:
-            print(f"[relay-webhook] {exc}")
-            self._invalidate_webhook_url(url)
-            return None if wait else False
+        except discord.HTTPException as exc:
+            try:
+                msg = await wh.send(
+                    content=plain_content or None,
+                    username=username[:80],
+                    avatar_url=None,
+                    embeds=[plain_embed] if plain_embed else discord.utils.MISSING,
+                    files=files if files else discord.utils.MISSING,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                    silent=silent,
+                    wait=wait,
+                )
+                return msg if wait else True
+            except discord.HTTPException:
+                pass
+            print(f"[relay-webhook-content-fallback] status={getattr(exc, 'status', None)} code={getattr(exc, 'code', None)} {exc}")
+            return None
 
     async def _repair_relay_webhook(
         self,

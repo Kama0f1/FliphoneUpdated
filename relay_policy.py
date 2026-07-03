@@ -11,6 +11,7 @@ import discord
 
 URL_RE = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
 CUSTOM_EMOJI_RE = re.compile(r"<(?P<animated>a?):(?P<name>[A-Za-z0-9_]{2,32}):(?P<id>\d+)>")
+ANIMATED_CUSTOM_EMOJI_RE = re.compile(r"<a:(?P<name>[A-Za-z0-9_]{2,32}):(?P<id>\d+)>")
 PROVIDER_HOSTS = {
     "tenor.com",
     "giphy.com",
@@ -58,6 +59,20 @@ def extract_custom_emojis(content: str, *, limit: Optional[int] = None) -> list[
 def custom_emoji_asset_url(emoji_id: int, animated: bool) -> str:
     ext = "gif" if animated else "png"
     return f"https://cdn.discordapp.com/emojis/{int(emoji_id)}.{ext}"
+
+
+def downgrade_animated_custom_emoji_markup(content: str) -> tuple[str, list[int]]:
+    app_emoji_ids: list[int] = []
+
+    def _replacement(match: re.Match[str]) -> str:
+        app_emoji_ids.append(int(match.group("id")))
+        return f"<:{match.group('name')}:{match.group('id')}>"
+
+    return ANIMATED_CUSTOM_EMOJI_RE.sub(_replacement, content or ""), app_emoji_ids
+
+
+def plain_custom_emoji_fallback(content: str, replacement: str = "emoji") -> str:
+    return CUSTOM_EMOJI_RE.sub(replacement, content or "")
 
 
 async def replace_approved_custom_emojis(content: str, db: object) -> tuple[str, list[int]]:

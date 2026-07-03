@@ -37,10 +37,12 @@ import config
 from database import Database
 from filter import filter_message
 from relay_policy import (
+    downgrade_animated_custom_emoji_markup,
     extract_urls,
     is_direct_gif_url,
     is_local_only,
     is_provider_gif,
+    plain_custom_emoji_fallback,
     replace_approved_custom_emojis,
 )
 # GifReportView lives in phonebooth; import lazily via bot.get_cog to avoid circular imports.
@@ -785,29 +787,125 @@ class Room(commands.Cog):
         silent: bool = False,
     ) -> discord.WebhookMessage | bool | None:
         """Send via webhook. Returns the message when requested, otherwise success."""
+        session = getattr(self.bot, "http_session", None)
+        own_session = session is None or session.closed
         try:
-            session = getattr(self.bot, "http_session", None)
-            _own_session = session is None or session.closed
-            if _own_session:
+            if own_session:
                 session = aiohttp.ClientSession()
+            wh = discord.Webhook.from_url(url, session=session)
+            msg = await wh.send(
+                content=content or None,
+                username=username[:80],
+                avatar_url=avatar_url,
+                files=files if files else discord.utils.MISSING,
+                embed=embed if embed is not None else discord.utils.MISSING,
+                allowed_mentions=discord.AllowedMentions.none(),
+                silent=silent,
+                wait=wait,
+            )
+            return msg if wait else True
+        except discord.HTTPException as exc:
+            status = getattr(exc, "status", None)
+            if status == 400 and "wh" in locals():
+                fallback = await self._send_webhook_bad_content_fallback(
+                    wh,
+                    content,
+                    username,
+                    avatar_url,
+                    files,
+                    embed=embed,
+                    wait=wait,
+                    silent=silent,
+                )
+                if fallback:
+                    return fallback
+                print(f"[room-relay-content] status={status} code={getattr(exc, 'code', None)} {exc}")
+                return None
+            print(f"[room-relay] status={status} code={getattr(exc, 'code', None)} {exc}")
+            return None
+        except Exception as exc:
+            print(f"[room-relay] {exc}")
+            return None
+        finally:
+            if own_session and session:
+                await session.close()
+
+    async def _send_webhook_bad_content_fallback(
+        self,
+        wh: discord.Webhook,
+        content: Optional[str],
+        username: str,
+        avatar_url: Optional[str],
+        files: list[discord.File],
+        *,
+        embed: Optional[discord.Embed] = None,
+        wait: bool = False,
+        silent: bool = False,
+    ) -> discord.WebhookMessage | bool | None:
+        def _downgrade_embed(value: Optional[discord.Embed]) -> tuple[Optional[discord.Embed], list[int]]:
+            if not value or not value.description:
+                return value, []
+            updated, ids = downgrade_animated_custom_emoji_markup(value.description)
+            if not ids:
+                return value, []
+            clone = value.copy()
+            clone.description = updated
+            return clone, ids
+
+        downgraded_content, content_ids = downgrade_animated_custom_emoji_markup(content or "")
+        downgraded_embed, embed_ids = _downgrade_embed(embed)
+        if content_ids or embed_ids:
             try:
-                wh = discord.Webhook.from_url(url, session=session)
                 msg = await wh.send(
-                    content=content or None,
+                    content=downgraded_content or None,
                     username=username[:80],
                     avatar_url=avatar_url,
                     files=files if files else discord.utils.MISSING,
-                    embed=embed if embed is not None else discord.utils.MISSING,
+                    embed=downgraded_embed if downgraded_embed else discord.utils.MISSING,
                     allowed_mentions=discord.AllowedMentions.none(),
                     silent=silent,
                     wait=wait,
                 )
-            finally:
-                if _own_session:
-                    await session.close()
+                asyncio.create_task(self.db.mark_app_emojis_static(content_ids + embed_ids))
+                return msg if wait else True
+            except discord.HTTPException:
+                pass
+
+        plain_content = plain_custom_emoji_fallback(content or "").strip()
+        plain_embed = embed
+        if embed and embed.description:
+            plain_embed = embed.copy()
+            plain_embed.description = plain_custom_emoji_fallback(embed.description).strip() or "emoji"
+        if not plain_content and not plain_embed and not files:
+            plain_content = "emoji"
+        try:
+            msg = await wh.send(
+                content=plain_content or None,
+                username=username[:80],
+                avatar_url=avatar_url,
+                files=files if files else discord.utils.MISSING,
+                embed=plain_embed if plain_embed else discord.utils.MISSING,
+                allowed_mentions=discord.AllowedMentions.none(),
+                silent=silent,
+                wait=wait,
+            )
             return msg if wait else True
-        except Exception as exc:
-            print(f"[room-relay] {exc}")
+        except discord.HTTPException as exc:
+            try:
+                msg = await wh.send(
+                    content=plain_content or None,
+                    username=username[:80],
+                    avatar_url=None,
+                    files=files if files else discord.utils.MISSING,
+                    embed=plain_embed if plain_embed else discord.utils.MISSING,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                    silent=silent,
+                    wait=wait,
+                )
+                return msg if wait else True
+            except discord.HTTPException:
+                pass
+            print(f"[room-relay-content-fallback] status={getattr(exc, 'status', None)} code={getattr(exc, 'code', None)} {exc}")
             return None
 
     # ── Message relay (one sender → all others) ───────────────────────────────
