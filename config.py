@@ -38,6 +38,7 @@ LOG_CHANNEL_ID: int = int(os.getenv("LOG_CHANNEL_ID", "1511060418083291268"))
 # Leave blank / 0 to disable (reports still get stored in the DB).
 REPORT_LOG_CHANNEL_ID: int = int(os.getenv("REPORT_LOG_CHANNEL_ID", "0"))
 GIF_REVIEW_CHANNEL_ID: int = int(os.getenv("GIF_REVIEW_CHANNEL_ID", "1517186263000682737"))
+EMOJI_REVIEW_CHANNEL_ID: int = int(os.getenv("EMOJI_REVIEW_CHANNEL_ID", "0"))
 
 SUPPORT_URL: str = os.getenv("SUPPORT_URL", "https://discord.gg/t3KHGqPuEP")
 TOPGG_URL: str = os.getenv("TOPGG_URL", "https://top.gg/bot/1489342959974486158")

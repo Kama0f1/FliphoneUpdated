@@ -19,7 +19,8 @@ CALL_COMMANDS = [
     ("friendrequest", "f.fr", "Share your Discord username in the conversation."),
     ("anon", "f.anon", "Toggle your tarot anon identity."),
     ("notify", "f.notify", "Toggle queue notification DMs."),
-    ("addgif", "f.addgif", "Submit a GIF URL for safe relay approval."),
+    ("addgif", "f.addgif", "Submit a GIF for safe relay approval. Burst limits still apply."),
+    ("addemoji", "f.addemoji", "Submit up to 5 custom server emojis for review."),
     ("report", "f.report", "Report the active or most recent conversation."),
     ("profile", "f.profile", "Show your level, XP, ranks, and banner."),
     ("banner", "f.banner", "Reroll your profile banner."),
@@ -63,16 +64,67 @@ SUDO_COMMANDS = [
     ("censor", "f.censor <word>", "Toggle a custom censored word."),
     ("censorlist", "f.censorlist", "List custom censored words."),
     ("gifreports", "f.gifreports", "Review reported GIFs."),
+    ("gifbl", "f.gifbl <id or url>", "Blacklist a GIF report or URL."),
+    ("gifwl", "f.gifwl <id or url>", "Whitelist a GIF report or URL."),
+    ("gifcheck", "f.gifcheck <url>", "Check GIF whitelist/blacklist status."),
+    ("emojicleanup", "f.emojicleanup [days] [limit]", "Delete unused or stale mirrored app emojis."),
     ("userreports", "f.userreports", "Review conversation reports."),
     ("resolvereport", "f.resolvereport <id>", "Resolve a conversation report."),
 ]
 
-ALL_PUBLIC = {name: item for item in CALL_COMMANDS + ROOM_COMMANDS + ADMIN_COMMANDS for name in [item[0]]}
-ALL_SUDO = {name: item for item in SUDO_COMMANDS for name in [item[0]]}
+PUBLIC_ALIASES = {
+    "c": "call",
+    "h": "hangup",
+    "s": "skip",
+    "fr": "friendrequest",
+    "notifications": "notify",
+    "addemote": "addemoji",
+    "submitemoji": "addemoji",
+    "r": "room",
+    "rc": "roomcreate",
+    "rl": "roomleave",
+    "rs": "roomskip",
+    "rst": "roomstatus",
+    "rk": "roomkick",
+    "setupcheck": "check",
+    "doctor": "check",
+    "fixsetup": "repair",
+    "fix": "repair",
+    "blocked": "blocklist",
+    "remove": "teardown",
+}
+
+SUDO_ALIASES = {
+    "ownerhelp": "sudohelp",
+    "modhelp": "sudohelp",
+    "database": "dbstatus",
+    "db": "dbstatus",
+}
+
+ALL_PUBLIC = {item[0]: item for item in CALL_COMMANDS + ROOM_COMMANDS + ADMIN_COMMANDS}
+ALL_SUDO = {item[0]: item for item in SUDO_COMMANDS}
 
 
 def _command_lines(items: list[tuple[str, str, str]]) -> str:
     return "\n".join(f"`{usage}` - {description}" for _name, usage, description in items)
+
+
+def _add_command_fields(embed: discord.Embed, title: str, items: list[tuple[str, str, str]]) -> None:
+    lines = [f"`{usage}` - {description}" for _name, usage, description in items]
+    chunk: list[str] = []
+    index = 1
+    for line in lines:
+        candidate = "\n".join(chunk + [line])
+        if chunk and len(candidate) > 1000:
+            name = title if index == 1 else f"{title} {index}"
+            embed.add_field(name=name, value="\n".join(chunk), inline=False)
+            chunk = [line]
+            index += 1
+        else:
+            chunk.append(line)
+    if chunk:
+        name = title if index == 1 else f"{title} {index}"
+        embed.add_field(name=name, value="\n".join(chunk), inline=False)
 
 
 def _page_embed(page: int) -> discord.Embed:
@@ -82,7 +134,7 @@ def _page_embed(page: int) -> discord.Embed:
             description="Commands for 1:1 conversations and your Fliphone profile.",
             color=config.COLOR_WAIT,
         )
-        embed.add_field(name="Commands", value=_command_lines(CALL_COMMANDS), inline=False)
+        _add_command_fields(embed, "Commands", CALL_COMMANDS)
     elif page == 1:
         embed = discord.Embed(
             title="Fliphone Help - Rooms",
@@ -92,14 +144,14 @@ def _page_embed(page: int) -> discord.Embed:
             ),
             color=config.COLOR_WAIT,
         )
-        embed.add_field(name="Commands", value=_command_lines(ROOM_COMMANDS), inline=False)
+        _add_command_fields(embed, "Commands", ROOM_COMMANDS)
     else:
         embed = discord.Embed(
             title="Fliphone Help - Server Setup",
             description="These commands require Manage Channels in the server.",
             color=config.COLOR_WAIT,
         )
-        embed.add_field(name="Commands", value=_command_lines(ADMIN_COMMANDS), inline=False)
+        _add_command_fields(embed, "Commands", ADMIN_COMMANDS)
     embed.set_footer(text="Use f.help <command> for details. Restricted tools: f.sudohelp")
     return embed
 
@@ -147,6 +199,7 @@ class Help(commands.Cog):
     async def help(self, ctx: commands.Context, *, command: Optional[str] = None) -> None:
         if command:
             key = command.strip().lower().removeprefix(config.PREFIX.lower())
+            key = PUBLIC_ALIASES.get(key, key)
             entry = ALL_PUBLIC.get(key)
             if not entry:
                 await ctx.send(f"No public command named `{command}`.")
@@ -164,6 +217,7 @@ class Help(commands.Cog):
             return
         if command:
             key = command.strip().lower().removeprefix(config.PREFIX.lower())
+            key = SUDO_ALIASES.get(key, key)
             entry = ALL_SUDO.get(key)
             if not entry:
                 await ctx.send(f"No restricted command named `{command}`.")
@@ -173,9 +227,9 @@ class Help(commands.Cog):
             return
         embed = discord.Embed(
             title="Fliphone Restricted Tools",
-            description=_command_lines(SUDO_COMMANDS),
             color=config.COLOR_WAIT,
         )
+        _add_command_fields(embed, "Commands", SUDO_COMMANDS)
         embed.set_footer(text=config.FOOTER)
         await ctx.send(embed=embed)
 

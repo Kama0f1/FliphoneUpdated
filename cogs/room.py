@@ -41,6 +41,7 @@ from relay_policy import (
     is_direct_gif_url,
     is_local_only,
     is_provider_gif,
+    replace_approved_custom_emojis,
 )
 # GifReportView lives in phonebooth; import lazily via bot.get_cog to avoid circular imports.
 
@@ -1018,8 +1019,9 @@ class Room(commands.Cog):
             except discord.HTTPException:
                 pass
 
-        # ── Strip custom emojis silently ─────────────────────────────────────
-        content = CUSTOM_EMOJI_PATTERN.sub("", content).strip()
+        # Mirror approved submitted emojis; strip every other custom emoji.
+        content, used_custom_emoji_ids = await replace_approved_custom_emojis(content, self.db)
+        content = content.strip()
         content, emojis_trimmed = _limit_unicode_emojis(content)
         if emojis_trimmed:
             content = content.strip()
@@ -1241,6 +1243,8 @@ class Room(commands.Cog):
                     await asyncio.gather(*report_tasks, return_exceptions=True)
 
         if len(message_copies) > 1:
+            if used_custom_emoji_ids:
+                asyncio.create_task(self.db.increment_emoji_usage(used_custom_emoji_ids))
             for copy in message_copies:
                 self._reaction_routes[copy] = [item for item in message_copies if item != copy]
 

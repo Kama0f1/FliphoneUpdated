@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import re
-from typing import Optional
+from typing import NamedTuple, Optional
 from urllib.parse import urlsplit
 
 import discord
 
 
 URL_RE = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
-CUSTOM_EMOJI_RE = re.compile(r"<a?:[A-Za-z0-9_]{2,32}:\d+>")
+CUSTOM_EMOJI_RE = re.compile(r"<(?P<animated>a?):(?P<name>[A-Za-z0-9_]{2,32}):(?P<id>\d+)>")
 PROVIDER_HOSTS = {
     "tenor.com",
     "giphy.com",
@@ -19,12 +19,82 @@ PROVIDER_HOSTS = {
 }
 
 
+class CustomEmojiCandidate(NamedTuple):
+    markup: str
+    name: str
+    emoji_id: int
+    animated: bool
+
+
 def is_local_only(content: str) -> bool:
     return content.startswith(("x ", "X "))
 
 
 def contains_custom_emoji(content: str) -> bool:
     return bool(CUSTOM_EMOJI_RE.search(content))
+
+
+def extract_custom_emojis(content: str, *, limit: Optional[int] = None) -> list[CustomEmojiCandidate]:
+    emojis: list[CustomEmojiCandidate] = []
+    seen: set[int] = set()
+    for match in CUSTOM_EMOJI_RE.finditer(content or ""):
+        emoji_id = int(match.group("id"))
+        if emoji_id in seen:
+            continue
+        seen.add(emoji_id)
+        emojis.append(
+            CustomEmojiCandidate(
+                markup=match.group(0),
+                name=match.group("name"),
+                emoji_id=emoji_id,
+                animated=bool(match.group("animated")),
+            )
+        )
+        if limit is not None and len(emojis) >= limit:
+            break
+    return emojis
+
+
+def custom_emoji_asset_url(emoji_id: int, animated: bool) -> str:
+    ext = "gif" if animated else "png"
+    return f"https://cdn.discordapp.com/emojis/{int(emoji_id)}.{ext}"
+
+
+async def replace_approved_custom_emojis(content: str, db: object) -> tuple[str, list[int]]:
+    """Replace approved submitted emoji with mirrored application emoji markup.
+
+    Unknown, pending, rejected, blacklisted, or deleted emoji are stripped here.
+    Keeping this centralized makes future premium gating a single policy change.
+    """
+    if not content or not CUSTOM_EMOJI_RE.search(content):
+        return content, []
+
+    original_ids = [
+        int(match.group("id"))
+        for match in CUSTOM_EMOJI_RE.finditer(content)
+    ]
+    approved = await db.get_approved_emoji_submissions(original_ids)
+    used_ids: list[int] = []
+    seen_used: set[int] = set()
+
+    def _is_animated(value: object) -> bool:
+        if isinstance(value, str):
+            return value.lower() in {"1", "true", "t", "yes"}
+        return bool(value)
+
+    def _replacement(match: re.Match[str]) -> str:
+        original_id = int(match.group("id"))
+        row = approved.get(original_id)
+        if not row or not row.get("app_emoji_id"):
+            return ""
+        if original_id not in seen_used:
+            used_ids.append(original_id)
+            seen_used.add(original_id)
+        prefix = "a" if _is_animated(row.get("animated")) else ""
+        name = str(row.get("app_emoji_name") or row.get("original_name") or match.group("name"))
+        return f"<{prefix}:{name}:{int(row['app_emoji_id'])}>"
+
+    return CUSTOM_EMOJI_RE.sub(_replacement, content), used_ids
 
 
 def extract_urls(content: str) -> list[str]:

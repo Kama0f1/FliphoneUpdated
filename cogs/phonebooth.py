@@ -35,6 +35,7 @@ from relay_policy import (
     is_direct_gif_url,
     is_local_only,
     is_provider_gif,
+    replace_approved_custom_emojis,
 )
 
 # This catches Tenor, Giphy, Klipy, and ANY link that ends in .gif
@@ -1353,7 +1354,8 @@ class Phonebooth(commands.Cog):
             except discord.HTTPException:
                 pass
 
-        content = CUSTOM_EMOJI_PATTERN.sub("", content).strip()
+        content, used_custom_emoji_ids = await replace_approved_custom_emojis(content, self.db)
+        content = content.strip()
         content, emojis_trimmed = _limit_unicode_emojis(content)
         if emojis_trimmed:
             content = content.strip()
@@ -1524,6 +1526,8 @@ class Phonebooth(commands.Cog):
         if main_wh_msg:
             self._reaction_routes[(message.channel.id, message.id)] = (target_cid, main_wh_msg.id)
             self._reaction_routes[(target_cid, main_wh_msg.id)] = (message.channel.id, message.id)
+            if used_custom_emoji_ids:
+                asyncio.create_task(self.db.increment_emoji_usage(used_custom_emoji_ids))
             asyncio.create_task(
                 self.db.add_chat_xp(
                     message.author.id,
