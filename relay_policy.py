@@ -69,11 +69,16 @@ async def replace_approved_custom_emojis(content: str, db: object) -> tuple[str,
     if not content or not CUSTOM_EMOJI_RE.search(content):
         return content, []
 
-    original_ids = [
+    emoji_ids = [
         int(match.group("id"))
         for match in CUSTOM_EMOJI_RE.finditer(content)
     ]
-    approved = await db.get_approved_emoji_submissions(original_ids)
+    approved_by_original = await db.get_approved_emoji_submissions(emoji_ids)
+    app_lookup_ids = [
+        emoji_id for emoji_id in dict.fromkeys(emoji_ids)
+        if emoji_id not in approved_by_original
+    ]
+    approved_by_app = await db.get_approved_emoji_submissions_by_app_ids(app_lookup_ids)
     used_ids: list[int] = []
     seen_used: set[int] = set()
 
@@ -83,10 +88,11 @@ async def replace_approved_custom_emojis(content: str, db: object) -> tuple[str,
         return bool(value)
 
     def _replacement(match: re.Match[str]) -> str:
-        original_id = int(match.group("id"))
-        row = approved.get(original_id)
+        emoji_id = int(match.group("id"))
+        row = approved_by_original.get(emoji_id) or approved_by_app.get(emoji_id)
         if not row or not row.get("app_emoji_id"):
             return ""
+        original_id = int(row["original_emoji_id"])
         if original_id not in seen_used:
             used_ids.append(original_id)
             seen_used.add(original_id)

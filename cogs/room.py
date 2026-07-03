@@ -970,7 +970,9 @@ class Room(commands.Cog):
                     else:
                         ref_text = "message"
                 ref_text, _ = filter_message(ref_text)
-                ref_text = CUSTOM_EMOJI_PATTERN.sub("", ref_text).strip()
+                had_custom_emoji = bool(CUSTOM_EMOJI_PATTERN.search(ref_text))
+                ref_text, _ = await replace_approved_custom_emojis(ref_text, self.db)
+                ref_text = ref_text.strip() or ("emoji" if had_custom_emoji else "")
                 ref_text, _ = _limit_unicode_emojis(ref_text)
                 ref_text = _render_user_mentions(ref_text, message.guild)
                 reply_context = (

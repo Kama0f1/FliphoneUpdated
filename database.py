@@ -1548,6 +1548,24 @@ class Database:
         )
         return {int(row["original_emoji_id"]): row for row in rows}
 
+    async def get_approved_emoji_submissions_by_app_ids(
+        self, app_emoji_ids: Sequence[int]
+    ) -> dict[int, dict]:
+        ids = [int(value) for value in dict.fromkeys(app_emoji_ids)]
+        if not ids:
+            return {}
+        placeholders = ", ".join("?" for _ in ids)
+        rows = await self._fetchall(
+            f"""
+            SELECT * FROM emoji_submissions
+            WHERE app_emoji_id IN ({placeholders})
+              AND status = 'approved'
+              AND app_emoji_id IS NOT NULL
+            """,
+            tuple(ids),
+        )
+        return {int(row["app_emoji_id"]): row for row in rows}
+
     async def increment_emoji_usage(self, original_emoji_ids: Sequence[int]) -> None:
         ids = [int(value) for value in dict.fromkeys(original_emoji_ids)]
         if not ids:
