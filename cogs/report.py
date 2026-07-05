@@ -27,7 +27,7 @@ import asyncio
 import collections
 import io
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import discord
@@ -357,6 +357,63 @@ class Report(commands.Cog):
             seen[entry["user_id"]] = entry
         return list(seen.values())
 
+    @staticmethod
+    def _safe_report_text(value: object, limit: int = 300) -> str:
+        text = " ".join(str(value or "").split())
+        text = discord.utils.escape_mentions(discord.utils.escape_markdown(text))
+        if len(text) <= limit:
+            return text
+        return f"{text[: max(0, limit - 3)]}..."
+
+    @staticmethod
+    def _format_report_time(value: Optional[str], fallback: str = "Unknown") -> str:
+        if not value:
+            return fallback
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        except (TypeError, ValueError):
+            return str(value)[:19].replace("T", " ")
+
+    def _build_readable_excerpt(
+        self,
+        entries: list[dict],
+        reported_guild_id: int,
+        *,
+        only_reported: bool = False,
+        max_messages: int = 8,
+        max_chars: int = 1_000,
+    ) -> str:
+        candidates = [
+            entry
+            for entry in entries
+            if entry.get("content")
+            and (
+                not only_reported
+                or int(entry["guild_id"]) == int(reported_guild_id)
+            )
+        ]
+        lines: list[str] = []
+        for entry in candidates[-max_messages:]:
+            timestamp = str(entry.get("timestamp") or "")
+            time_label = timestamp[11:19] if len(timestamp) >= 19 else "unknown"
+            side = (
+                "REPORTED"
+                if int(entry["guild_id"]) == int(reported_guild_id)
+                else "REPORTING"
+            )
+            username = self._safe_report_text(entry.get("username") or "Unknown", 40)
+            content = self._safe_report_text(entry.get("content"), 220)
+            lines.append(f"`{time_label}` `{side}` **{username}:** {content}")
+
+        while len("\n".join(lines)) > max_chars and len(lines) > 1:
+            lines.pop(0)
+        if lines and len(lines[0]) > max_chars:
+            lines[0] = f"{lines[0][: max_chars - 3]}..."
+        return "\n".join(lines)
+
     # ── Core report logic ─────────────────────────────────────────────────────
 
     async def _process_report(
@@ -433,50 +490,51 @@ class Report(commands.Cog):
         reported_guild = self.bot.get_guild(call["other_guild_id"])
         reported_name  = reported_guild.name if reported_guild else "Unknown Server"
 
+        safe_reason = self._safe_report_text(reason, 500)
         log_embed = discord.Embed(
-            title=f"New Call Report — #{report_id}",
+            title=f"Call Report #{report_id}",
+            description=f"**Reason provided**\n{safe_reason}",
             color=config.COLOR_ERR,
             timestamp=datetime.utcnow(),
         )
         log_embed.add_field(
-            name="Reported Server",
-            value=f"{reported_name}\n`{call['other_guild_id']}`",
-            inline=True,
+            name="Reported Side",
+            value=(
+                f"**{self._safe_report_text(reported_name, 100)}**\n"
+                f"Server ID: `{call['other_guild_id']}`"
+            ),
+            inline=False,
         )
         log_embed.add_field(
-            name="Reported By",
-            value=f"{guild.name}\n`{guild.id}`",
-            inline=True,
+            name="Reporting Side",
+            value=(
+                f"**{self._safe_report_text(guild.name, 100)}**\n"
+                f"Server ID: `{guild.id}`\n"
+                f"Reporter: <@{user.id}> (`{user.id}`)"
+            ),
+            inline=False,
         )
+        call_state = "Active when submitted" if call["active"] else "Already ended"
         log_embed.add_field(
-            name="Reporter",
-            value=f"<@{user.id}>\n`{user.id}`",
-            inline=True,
+            name="Timeline",
+            value=(
+                f"Started: **{self._format_report_time(call.get('started_at'))}**\n"
+                f"State: **{call_state}**"
+            ),
+            inline=False,
         )
-        log_embed.add_field(
-            name="Call Started",
-            value=call["started_at"][:19] if call.get("started_at") else "Unknown",
-            inline=True,
-        )
-        log_embed.add_field(
-            name="Call Active at Report Time",
-            value="Yes" if call["active"] else "No",
-            inline=True,
-        )
-        log_embed.add_field(name="\u200b", value="\u200b", inline=True)
-        log_embed.add_field(name="Reason", value=reason[:500], inline=False)
 
         # Recent senders — filter out the reporter's own guild
         other_senders = [s for s in senders if s["guild_id"] != guild.id]
         if other_senders:
             sender_lines = [
-                f"<@{s['user_id']}> **@{s['username']}**\n"
-                f"`{s['user_id']}` — {s['guild_name']} — {s['timestamp']}"
+                f"- <@{s['user_id']}> **{self._safe_report_text(s['username'], 40)}** "
+                f"(`{s['user_id']}`)"
                 for s in other_senders[:10]
             ]
             log_embed.add_field(
-                name=f"Recent Senders from Reported Server ({len(other_senders)})",
-                value="\n\n".join(sender_lines),
+                name=f"People Seen on Reported Side ({len(other_senders)})",
+                value="\n".join(sender_lines),
                 inline=False,
             )
         else:
@@ -490,29 +548,50 @@ class Report(commands.Cog):
         raw_log = self._message_log.get(call.get("conn_id")) or self._last_logs.get(
             call.get("conn_id"), []
         )
-        relevant = [entry for entry in raw_log if entry["guild_id"] != guild.id and entry.get("content")]
         transcript_file = None
-        if relevant:
-            excerpt = "\n".join(
-                f"[{entry['timestamp'][11:19]}] {entry['username']}: {entry['content']}"
-                for entry in relevant[-20:]
-            )
+        reported_excerpt = self._build_readable_excerpt(
+            list(raw_log), call["other_guild_id"], only_reported=True
+        )
+        if reported_excerpt:
             log_embed.add_field(
-                name="Recent Conversation Excerpt",
-                value=f"```\n{excerpt[:950]}\n```",
+                name="Latest Messages from Reported Side",
+                value=reported_excerpt,
+                inline=False,
+            )
+
+        context_excerpt = self._build_readable_excerpt(
+            list(raw_log), call["other_guild_id"]
+        )
+        if context_excerpt:
+            log_embed.add_field(
+                name="Latest Two-Sided Context",
+                value=context_excerpt,
                 inline=False,
             )
 
         captured = [entry for entry in raw_log if entry.get("content")]
         if captured:
-            transcript = "\n".join(
-                (
-                    f"[{entry['timestamp']}] {entry['username']} "
-                    f"(user {entry['user_id']}; {entry['guild_name']} / "
-                    f"server {entry['guild_id']}): {entry['content']}"
-                )
-                for entry in captured
+            transcript_header = (
+                f"FLIPHONE CALL REPORT #{report_id}\n"
+                f"Reason: {' '.join(reason.split())}\n"
+                f"Reported side: {reported_name} (server {call['other_guild_id']})\n"
+                f"Reporting side: {guild.name} (server {guild.id})\n"
+                "Legend: REPORTED = the side being reported; REPORTING = the side that filed it.\n"
+                "=" * 72
             )
+            transcript_lines = []
+            for entry in captured:
+                side = (
+                    "REPORTED"
+                    if int(entry["guild_id"]) == int(call["other_guild_id"])
+                    else "REPORTING"
+                )
+                content = " ".join(str(entry.get("content") or "").split())
+                transcript_lines.append(
+                    f"[{entry['timestamp']} UTC] [{side}] {entry['username']} "
+                    f"(user {entry['user_id']}):\n  {content}"
+                )
+            transcript = f"{transcript_header}\n\n" + "\n\n".join(transcript_lines)
             transcript_file = discord.File(
                 io.BytesIO(transcript.encode("utf-8")),
                 filename=f"report-{report_id}-excerpt.txt",
@@ -531,9 +610,7 @@ class Report(commands.Cog):
             ):
                 log_embed.set_image(url=media_links[0])
 
-        log_embed.set_footer(
-            text=f"f.resolvereport {report_id} to close  •  {config.FOOTER}"
-        )
+        log_embed.set_footer(text=f"Full context is attached | f.resolvereport {report_id} to close")
 
         try:
             review_message = await log_ch.send(embed=log_embed, file=transcript_file)
@@ -673,9 +750,6 @@ class Report(commands.Cog):
     # ── f.resolvereport ───────────────────────────────────────────────────────
 
     def _build_userreport_detail_embed(self, report: dict) -> discord.Embed:
-        def _timestamp(value: Optional[str], fallback: str) -> str:
-            return str(value)[:19] if value else fallback
-
         reported_guild = self.bot.get_guild(report["reported_guild_id"])
         reporter_guild = self.bot.get_guild(report["reporter_guild_id"])
         reported_name = reported_guild.name if reported_guild else "Unknown Server"
@@ -683,46 +757,56 @@ class Report(commands.Cog):
 
         embed = discord.Embed(
             title=f"Call Report #{report['id']}",
-            description=(report.get("reason") or "No reason provided.")[:4096],
+            description=(
+                "**Reason provided**\n"
+                f"{self._safe_report_text(report.get('reason') or 'No reason provided.', 500)}"
+            ),
             color=config.COLOR_WARN,
         )
         embed.add_field(
-            name="Reported Server",
-            value=f"{reported_name}\n`{report['reported_guild_id']}`",
-            inline=True,
-        )
-        embed.add_field(
-            name="Reported By",
-            value=f"{reporter_name}\n`{report['reporter_guild_id']}`",
-            inline=True,
-        )
-        embed.add_field(
-            name="Reporter",
-            value=f"<@{report['reporter_user_id']}>\n`{report['reporter_user_id']}`",
-            inline=True,
-        )
-        embed.add_field(
-            name="Call Started",
-            value=_timestamp(report.get("call_started_at"), "Unknown"),
-            inline=True,
-        )
-        embed.add_field(
-            name="Call Ended",
-            value=_timestamp(report.get("call_ended_at"), "Active when reported"),
-            inline=True,
-        )
-        embed.add_field(
-            name="Submitted",
-            value=_timestamp(report.get("created_at"), "Unknown"),
-            inline=True,
-        )
-        excerpt = self._build_panel_excerpt(report)
-        embed.add_field(
-            name="Recent Conversation Excerpt",
+            name="Reported Side",
             value=(
-                f"```text\n{excerpt}\n```"
-                if excerpt
-                else "Temporary excerpt unavailable or expired. Check the original report message for attached evidence."
+                f"**{self._safe_report_text(reported_name, 100)}**\n"
+                f"Server ID: `{report['reported_guild_id']}`"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Reporting Side",
+            value=(
+                f"**{self._safe_report_text(reporter_name, 100)}**\n"
+                f"Server ID: `{report['reporter_guild_id']}`\n"
+                f"Reporter: <@{report['reporter_user_id']}> (`{report['reporter_user_id']}`)"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Timeline",
+            value=(
+                f"Started: **{self._format_report_time(report.get('call_started_at'))}**\n"
+                f"Ended: **{self._format_report_time(report.get('call_ended_at'), 'Active when reported')}**\n"
+                f"Submitted: **{self._format_report_time(report.get('created_at'))}**"
+            ),
+            inline=False,
+        )
+        log = self._get_log_for_report(report)
+        reported_excerpt = self._build_readable_excerpt(
+            log, report["reported_guild_id"], only_reported=True, max_messages=6
+        )
+        context_excerpt = self._build_readable_excerpt(
+            log, report["reported_guild_id"], max_messages=6
+        )
+        if reported_excerpt:
+            embed.add_field(
+                name="Latest Messages from Reported Side",
+                value=reported_excerpt,
+                inline=False,
+            )
+        embed.add_field(
+            name="Latest Two-Sided Context",
+            value=(
+                context_excerpt
+                or "Temporary context unavailable or expired. Check the original report message attachment."
             ),
             inline=False,
         )
@@ -736,35 +820,6 @@ class Report(commands.Cog):
             return []
         log = self._message_log.get(session_id) or self._last_logs.get(session_id, [])
         return list(log)
-
-    def _build_panel_excerpt(self, report: dict) -> str:
-        log = self._get_log_for_report(report)
-        if not log:
-            return ""
-
-        lines: list[str] = []
-        length = 0
-        for entry in reversed(log):
-            content = " ".join(str(entry.get("content") or "").split())
-            if not content:
-                continue
-            content = content.replace("```", "`\u200b``")[:260]
-            username = str(entry.get("username") or "Unknown").replace("```", "`\u200b``")
-            side = (
-                "Reported"
-                if int(entry["guild_id"]) == int(report["reported_guild_id"])
-                else "Reporter"
-            )
-            timestamp = str(entry.get("timestamp") or "")
-            time_label = timestamp[11:19] if len(timestamp) >= 19 else "unknown"
-            line = f"[{time_label}] {side} / {username}: {content}"
-            if length + len(line) + 1 > 970:
-                continue
-            lines.append(line)
-            length += len(line) + 1
-            if len(lines) >= 6:
-                break
-        return "\n".join(reversed(lines))
 
     def _build_userreports_embed(self, reports: list[dict]) -> discord.Embed:
         if not reports:
