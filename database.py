@@ -26,6 +26,7 @@ import config
 
 TABLE_ORDER = [
     "guild_config",
+    "relay_webhooks",
     "queue",
     "connections",
     "custom_words",
@@ -75,6 +76,14 @@ CREATE TABLE IF NOT EXISTS guild_config (
     setup_by    INTEGER,
     created_at  TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS relay_webhooks (
+    channel_id  INTEGER PRIMARY KEY,
+    guild_id    INTEGER NOT NULL,
+    webhook_url TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_relay_webhooks_guild ON relay_webhooks (guild_id);
 
 CREATE TABLE IF NOT EXISTS queue (
     channel_id  INTEGER PRIMARY KEY,
@@ -324,6 +333,14 @@ CREATE TABLE IF NOT EXISTS guild_config (
     setup_by    BIGINT,
     created_at  TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS relay_webhooks (
+    channel_id  BIGINT PRIMARY KEY,
+    guild_id    BIGINT NOT NULL,
+    webhook_url TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_relay_webhooks_guild ON relay_webhooks (guild_id);
 
 CREATE TABLE IF NOT EXISTS queue (
     channel_id  BIGINT PRIMARY KEY,
@@ -731,6 +748,41 @@ class Database:
               AND animated <> 0
             """
         )
+        await self._seed_relay_webhooks()
+
+    async def _seed_relay_webhooks(self) -> None:
+        sources = (
+            (
+                "SELECT channel_id, guild_id, webhook_url, created_at AS updated_at "
+                "FROM guild_config WHERE webhook_url IS NOT NULL"
+            ),
+            (
+                "SELECT channel_id, guild_id, webhook_url, joined_at AS updated_at "
+                "FROM queue WHERE webhook_url IS NOT NULL"
+            ),
+            (
+                "SELECT channel_a AS channel_id, guild_a AS guild_id, "
+                "webhook_a AS webhook_url, started_at AS updated_at "
+                "FROM connections WHERE webhook_a IS NOT NULL"
+            ),
+            (
+                "SELECT channel_b AS channel_id, guild_b AS guild_id, "
+                "webhook_b AS webhook_url, started_at AS updated_at "
+                "FROM connections WHERE webhook_b IS NOT NULL"
+            ),
+            (
+                "SELECT channel_id, guild_id, webhook_url, joined_at AS updated_at "
+                "FROM room_members WHERE webhook_url IS NOT NULL"
+            ),
+        )
+        for source in sources:
+            await self._execute(
+                f"""
+                INSERT INTO relay_webhooks (channel_id, guild_id, webhook_url, updated_at)
+                {source}
+                ON CONFLICT(channel_id) DO NOTHING
+                """
+            )
 
     async def _execute(self, sql: str, params: Sequence[Any] = ()) -> int:
         if self.backend == "postgres":
@@ -812,6 +864,7 @@ class Database:
         )
 
     async def delete_guild(self, guild_id: int) -> None:
+        await self._execute("DELETE FROM relay_webhooks WHERE guild_id = ?", (guild_id,))
         await self._execute("DELETE FROM guild_config WHERE guild_id = ?", (guild_id,))
 
     async def get_guild_config(self, guild_id: int) -> Optional[dict]:
@@ -863,6 +916,36 @@ class Database:
         await self._execute(
             "UPDATE guild_config SET webhook_url = ? WHERE channel_id = ?",
             (webhook_url, channel_id),
+        )
+
+    async def set_relay_webhook(
+        self,
+        channel_id: int,
+        guild_id: int,
+        webhook_url: str,
+    ) -> None:
+        await self._execute(
+            """
+            INSERT INTO relay_webhooks (channel_id, guild_id, webhook_url, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(channel_id) DO UPDATE SET
+                guild_id = excluded.guild_id,
+                webhook_url = excluded.webhook_url,
+                updated_at = excluded.updated_at
+            """,
+            (channel_id, guild_id, webhook_url, datetime.utcnow().isoformat()),
+        )
+
+    async def get_relay_webhook(self, channel_id: int) -> Optional[dict]:
+        return await self._fetchrow(
+            "SELECT * FROM relay_webhooks WHERE channel_id = ?",
+            (channel_id,),
+        )
+
+    async def delete_relay_webhook(self, channel_id: int) -> None:
+        await self._execute(
+            "DELETE FROM relay_webhooks WHERE channel_id = ?",
+            (channel_id,),
         )
 
     async def update_connection_webhook(self, channel_id: int, webhook_url: Optional[str]) -> None:

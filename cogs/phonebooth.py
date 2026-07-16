@@ -804,10 +804,10 @@ class Phonebooth(commands.Cog):
             webhooks = await channel.webhooks()
             for wh in webhooks:
                 if wh.user == self.bot.user and wh.name == "Fliphone":
-                    self._channel_webhook_urls[channel.id] = wh.url
+                    await self._remember_relay_webhook(channel, wh.url)
                     return wh.url
             wh = await channel.create_webhook(name="Fliphone")
-            self._channel_webhook_urls[channel.id] = wh.url
+            await self._remember_relay_webhook(channel, wh.url)
             return wh.url
         except discord.Forbidden:
             return None
@@ -815,8 +815,55 @@ class Phonebooth(commands.Cog):
             print(f"[webhook] {exc}")
             return None
 
+    async def _remember_relay_webhook(
+        self,
+        channel: discord.TextChannel,
+        webhook_url: str,
+    ) -> None:
+        self._channel_webhook_urls[channel.id] = webhook_url
+        await self.db.set_relay_webhook(channel.id, channel.guild.id, webhook_url)
+        await self.db.update_webhook(channel.id, webhook_url)
+        cfg = self._cfg_by_channel.get(channel.id)
+        if cfg is not None:
+            cfg["webhook_url"] = webhook_url
+
+    async def _persisted_relay_webhook(self, channel_id: int) -> Optional[str]:
+        stored = await self.db.get_relay_webhook(channel_id)
+        if stored and stored.get("webhook_url"):
+            return str(stored["webhook_url"])
+        cfg = await self._get_config_by_channel_cached(channel_id)
+        if cfg and cfg.get("webhook_url"):
+            return str(cfg["webhook_url"])
+        return None
+
+    async def _stored_webhook_is_valid(
+        self,
+        channel: discord.TextChannel,
+        webhook_url: str,
+    ) -> Optional[bool]:
+        """Return False only when Discord confirms a stored token is unusable."""
+        try:
+            session = self._session
+            if session is None or session.closed:
+                session = aiohttp.ClientSession()
+                self._session = session
+            webhook = discord.Webhook.from_url(webhook_url, session=session)
+            fetched = await webhook.fetch()
+            if fetched.channel_id is not None and int(fetched.channel_id) != channel.id:
+                return False
+            # Keep the original token-bearing object for sends. Discord's fetch
+            # response is used only to validate that the webhook still exists.
+            self._wh_obj_cache[webhook_url] = webhook
+            return True
+        except (discord.NotFound, discord.Forbidden, ValueError):
+            return False
+        except discord.HTTPException:
+            # A temporary Discord/API failure should not make us discard a token
+            # that can still deliver messages.
+            return None
+
     @staticmethod
-    def relay_permission_issues(channel: discord.TextChannel) -> list[str]:
+    def relay_runtime_permission_issues(channel: discord.TextChannel) -> list[str]:
         bot_member = channel.guild.me
         if bot_member is None:
             return ["Bot member unavailable"]
@@ -826,22 +873,48 @@ class Phonebooth(commands.Cog):
             ("Send Messages", perms.send_messages),
             ("Embed Links", perms.embed_links),
             ("Read Message History", perms.read_message_history),
-            ("Manage Webhooks", perms.manage_webhooks),
             ("Attach Files", perms.attach_files),
             ("Add Reactions", perms.add_reactions),
         )
         return [name for name, allowed in required if not allowed]
+
+    @staticmethod
+    def relay_permission_issues(channel: discord.TextChannel) -> list[str]:
+        issues = Phonebooth.relay_runtime_permission_issues(channel)
+        bot_member = channel.guild.me
+        if bot_member is not None and not channel.permissions_for(bot_member).manage_webhooks:
+            issues.append("Manage Webhooks")
+        return issues
 
     async def ensure_relay_webhook(
         self,
         channel: discord.TextChannel,
         *,
         force_refresh: bool = False,
+        known_webhook_url: Optional[str] = None,
     ) -> tuple[Optional[str], list[str]]:
-        """Validate required permissions and refresh the channel's stored webhook URL."""
-        issues = self.relay_permission_issues(channel)
+        """Return a working stored webhook, creating one only when necessary."""
+        issues = self.relay_runtime_permission_issues(channel)
         if issues:
             return None, issues
+
+        if not force_refresh:
+            cached = self._channel_webhook_urls.get(channel.id)
+            if cached:
+                return cached, []
+
+            stored_url = known_webhook_url or await self._persisted_relay_webhook(channel.id)
+            if stored_url:
+                valid = await self._stored_webhook_is_valid(channel, stored_url)
+                if valid is not False:
+                    await self._remember_relay_webhook(channel, stored_url)
+                    return stored_url, []
+                await self.db.delete_relay_webhook(channel.id)
+                await self.db.update_webhook(channel.id, None)
+
+        bot_member = channel.guild.me
+        if bot_member is None or not channel.permissions_for(bot_member).manage_webhooks:
+            return None, ["Manage Webhooks (needed to create or repair the relay webhook)"]
 
         webhook_url = await self.get_or_create_webhook(
             channel,
@@ -849,11 +922,6 @@ class Phonebooth(commands.Cog):
         )
         if not webhook_url:
             return None, ["Webhook access failed"]
-
-        asyncio.create_task(self.db.update_webhook(channel.id, webhook_url))
-        cfg = self._cfg_by_channel.get(channel.id)
-        if cfg is not None:
-            cfg["webhook_url"] = webhook_url
         return webhook_url, []
 
     async def rebuild_relay_webhook(
@@ -884,11 +952,7 @@ class Phonebooth(commands.Cog):
                 return None, ["This channel already has Discord's maximum number of webhooks"]
             return None, ["Discord webhook creation failed"]
 
-        self._channel_webhook_urls[channel.id] = webhook_url
-        await self.db.update_webhook(channel.id, webhook_url)
-        cfg = self._cfg_by_channel.get(channel.id)
-        if cfg is not None:
-            cfg["webhook_url"] = webhook_url
+        await self._remember_relay_webhook(channel, webhook_url)
         return webhook_url, []
 
     async def _get_user_relay_policy(self, user_id: int) -> tuple[bool, bool]:
@@ -957,7 +1021,10 @@ class Phonebooth(commands.Cog):
 
             partner_channel = self.bot.get_channel(match["channel_id"])
             if isinstance(partner_channel, discord.TextChannel):
-                webhook_url, issues = await self.ensure_relay_webhook(partner_channel)
+                webhook_url, issues = await self.ensure_relay_webhook(
+                    partner_channel,
+                    known_webhook_url=match.get("webhook_url"),
+                )
                 if webhook_url:
                     match["webhook_url"] = webhook_url
                     return match
@@ -972,7 +1039,7 @@ class Phonebooth(commands.Cog):
                     await partner_channel.send(
                         "⚠️ Fliphone removed this server from the queue because webhook relay is unavailable.\n"
                         f"Missing or broken: **{', '.join(issues)}**\n"
-                        "A server admin should run `f.setup` in this channel."
+                        "A server admin should run `/check` or `f.check` in this channel."
                     )
                 except discord.HTTPException:
                     pass
@@ -1779,7 +1846,7 @@ class Phonebooth(commands.Cog):
             await ctx.send(
                 "❌ Fliphone cannot start a call because webhook relay is unavailable.\n"
                 f"Missing or broken: **{', '.join(permission_issues)}**\n"
-                "A server admin should run `f.setup` in this channel."
+                "A server admin should run `/check` or `f.check` in this channel."
             )
             return
         claimed = await self._claim_valid_queue_match(
@@ -1963,7 +2030,7 @@ class Phonebooth(commands.Cog):
             await ctx.send(
                 "❌ Fliphone cannot search for a new call because webhook relay is unavailable.\n"
                 f"Missing or broken: **{', '.join(permission_issues)}**\n"
-                "A server admin should run `f.setup` in this channel."
+                "A server admin should run `/check` or `f.check` in this channel."
             )
             return
         claimed = await self._claim_valid_queue_match(

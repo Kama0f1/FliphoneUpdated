@@ -85,6 +85,15 @@ REQUIRED_PERMISSIONS = discord.Permissions(
     read_message_history=True,
     add_reactions=True,
 )
+REQUIRED_PERMISSION_CHECKS = (
+    ("View Channel", "view_channel"),
+    ("Send Messages", "send_messages"),
+    ("Manage Webhooks", "manage_webhooks"),
+    ("Embed Links", "embed_links"),
+    ("Attach Files", "attach_files"),
+    ("Read Message History", "read_message_history"),
+    ("Add Reactions", "add_reactions"),
+)
 
 
 class PhoneboothBot(commands.AutoShardedBot):
@@ -192,6 +201,60 @@ class PhoneboothBot(commands.AutoShardedBot):
         owner_id = getattr(guild, "owner_id", None)
         return f"ID:{owner_id}" if owner_id else "Unknown"
 
+    @staticmethod
+    def _missing_permission_names(perms: discord.Permissions) -> list[str]:
+        return [
+            label
+            for label, attribute in REQUIRED_PERMISSION_CHECKS
+            if not getattr(perms, attribute, False)
+        ]
+
+    def _permission_invite_url(self, guild_id: int) -> str:
+        return (
+            "https://discord.com/api/oauth2/authorize"
+            f"?client_id={self.user.id}&permissions={config.BOT_PERMISSIONS}"
+            f"&scope=bot%20applications.commands&guild_id={guild_id}&disable_guild_select=true"
+        )
+
+    async def _notify_owner_bot_is_hidden(
+        self,
+        guild: discord.Guild,
+        guild_missing: list[str],
+    ) -> None:
+        owner = guild.owner
+        if owner is None:
+            try:
+                owner = await guild.fetch_member(guild.owner_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return
+
+        problem = (
+            "Fliphone's server role is missing: **" + ", ".join(guild_missing) + "**."
+            if guild_missing
+            else "A channel or category permission override is hiding every text channel from Fliphone."
+        )
+        embed = discord.Embed(
+            title="Fliphone Cannot See Your Server Channels",
+            description=(
+                f"Fliphone was added to **{discord.utils.escape_markdown(guild.name)}**, but it cannot send "
+                "setup instructions in any text channel.\n\n"
+                f"{problem}\n\n"
+                "Allow **View Channel**, **Send Messages**, and **Manage Webhooks** for the Fliphone role. "
+                "Check category permissions too. A server owner or someone with Manage Roles must fix "
+                "channel/category overrides."
+            ),
+            color=config.COLOR_ERR,
+        )
+        embed.add_field(
+            name="Re-invite",
+            value=f"[Apply Fliphone's required server permissions]({self._permission_invite_url(guild.id)})",
+            inline=False,
+        )
+        try:
+            await owner.send(embed=embed)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
     @tasks.loop(minutes=30)
     async def _topgg_sync(self) -> None:
         await self._post_topgg_stats()
@@ -220,27 +283,27 @@ class PhoneboothBot(commands.AutoShardedBot):
         missing = []
         bot_member = guild.me
         if bot_member:
-            perms = bot_member.guild_permissions
-            required_permissions = (
-                ("View Channel", perms.view_channel),
-                ("Send Messages", perms.send_messages),
-                ("Manage Webhooks", perms.manage_webhooks),
-                ("Embed Links", perms.embed_links),
-                ("Attach Files", perms.attach_files),
-                ("Read Message History", perms.read_message_history),
-                ("Add Reactions", perms.add_reactions),
-            )
-            missing = [name for name, allowed in required_permissions if not allowed]
+            missing = self._missing_permission_names(bot_member.guild_permissions)
 
         # ── Try to send welcome in first available text channel ───────────────
+        fully_usable = []
+        sendable = []
+        for channel in guild.text_channels:
+            channel_perms = channel.permissions_for(guild.me)
+            if channel_perms.view_channel and channel_perms.send_messages:
+                sendable.append(channel)
+            if not self._missing_permission_names(channel_perms):
+                fully_usable.append(channel)
+
         target = None
-        if guild.system_channel and guild.system_channel.permissions_for(guild.me).send_messages:
+        if guild.system_channel in fully_usable:
             target = guild.system_channel
-        else:
-            for ch in guild.text_channels:
-                if ch.permissions_for(guild.me).send_messages:
-                    target = ch
-                    break
+        elif fully_usable:
+            target = fully_usable[0]
+        elif guild.system_channel in sendable:
+            target = guild.system_channel
+        elif sendable:
+            target = sendable[0]
 
         if target:
             try:
@@ -257,18 +320,33 @@ class PhoneboothBot(commands.AutoShardedBot):
                     ),
                     color=0x5865F2,
                 )
-                if missing:
-                    invite_url = (
-                        "https://discord.com/api/oauth2/authorize"
-                        f"?client_id={self.user.id}&permissions={config.BOT_PERMISSIONS}"
-                        f"&scope=bot%20applications.commands&guild_id={guild.id}&disable_guild_select=true"
-                    )
+                effective_missing = self._missing_permission_names(
+                    target.permissions_for(guild.me)
+                )
+                if effective_missing:
+                    guild_level_missing = [item for item in effective_missing if item in missing]
+                    override_missing = [item for item in effective_missing if item not in missing]
+                    details = []
+                    if guild_level_missing:
+                        details.append(
+                            "Fliphone's server role is missing: **"
+                            + ", ".join(guild_level_missing)
+                            + "**. Discord may have omitted permissions that the installing account could not grant."
+                        )
+                    if override_missing:
+                        details.append(
+                            "This channel or its category is overriding: **"
+                            + ", ".join(override_missing)
+                            + "**."
+                        )
                     embed.add_field(
                         name="⚠️ Missing Permissions",
                         value=(
-                            f"I'm missing: **{', '.join(missing)}**\n"
-                            f"**[Re-invite me with the correct permissions]({invite_url})**, then run `f.setup`.\n"
-                            "If setup still reports a missing permission, the chosen channel or category is denying it."
+                            "\n".join(details)
+                            + "\n"
+                            + f"**[Re-invite me with the correct server permissions]({self._permission_invite_url(guild.id)})**.\n"
+                            + "For channel/category overrides, ask the server owner or someone with Manage Roles "
+                            + "to allow Fliphone there."
                         ),
                         inline=False,
                     )
@@ -276,6 +354,8 @@ class PhoneboothBot(commands.AutoShardedBot):
                 await target.send(embed=embed)
             except discord.HTTPException:
                 pass
+        else:
+            await self._notify_owner_bot_is_hidden(guild, missing)
 
     async def on_guild_remove(self, guild: discord.Guild) -> None:
         logger.info(

@@ -234,6 +234,82 @@ class Admin(commands.Cog, name="Admin"):
             url += f"&guild_id={guild_id}&disable_guild_select=true"
         return url
 
+    def _permission_recovery_guidance(
+        self,
+        guild: discord.Guild,
+        user: discord.abc.User,
+        target: discord.TextChannel,
+        issues: list[str],
+    ) -> str:
+        permission_attributes = {
+            "View Channel": "view_channel",
+            "Send Messages": "send_messages",
+            "Embed Links": "embed_links",
+            "Read Message History": "read_message_history",
+            "Manage Webhooks": "manage_webhooks",
+            "Attach Files": "attach_files",
+            "Add Reactions": "add_reactions",
+        }
+        bot_member = guild.me
+        if bot_member is None:
+            return "Fliphone's server member is unavailable. Try again after Discord finishes loading the bot."
+
+        guild_permissions = bot_member.guild_permissions
+        guild_missing = [
+            issue
+            for issue in issues
+            if not getattr(guild_permissions, permission_attributes.get(issue, ""), False)
+        ]
+        override_missing = [issue for issue in issues if issue not in guild_missing]
+        guidance: list[str] = []
+
+        if guild_missing:
+            guidance.append(
+                "Fliphone's server role is missing **"
+                + ", ".join(guild_missing)
+                + "**. "
+                + f"**[Re-invite Fliphone with the required permissions]({self._invite_url(guild.id)})** "
+                + "or have the server owner update the Fliphone role."
+            )
+            if isinstance(user, discord.Member):
+                user_permissions = user.guild_permissions
+                cannot_grant = [
+                    issue
+                    for issue in guild_missing
+                    if not (
+                        user_permissions.administrator
+                        or getattr(user_permissions, permission_attributes.get(issue, ""), False)
+                    )
+                ]
+                if cannot_grant:
+                    guidance.append(
+                        "Your account cannot grant **"
+                        + ", ".join(cannot_grant)
+                        + "** on Discord's authorization screen. Ask the server owner or an admin who has "
+                        "those permissions to re-invite Fliphone."
+                    )
+
+        if override_missing:
+            scope = (
+                f"the **{target.category.name}** category"
+                if target.permissions_synced and target.category
+                else target.mention
+            )
+            guidance.append(
+                f"Fliphone has **{', '.join(override_missing)}** on its server role, but {scope} "
+                "is overriding it. In that channel/category's Permissions, allow those permissions for "
+                "the Fliphone role."
+            )
+            if isinstance(user, discord.Member):
+                user_permissions = user.guild_permissions
+                if not (user_permissions.administrator or user_permissions.manage_roles):
+                    guidance.append(
+                        "Your account cannot edit role permission overwrites. Ask the server owner or someone "
+                        "with **Manage Roles** to make that change."
+                    )
+
+        return "\n\n".join(guidance) or "Run `f.repair` to rebuild the relay webhook."
+
     async def _delete_fliphone_webhooks(self, channel: Optional[discord.TextChannel]) -> None:
         if not channel:
             return
@@ -389,6 +465,7 @@ class Admin(commands.Cog, name="Admin"):
     ) -> tuple[discord.Embed, Optional[int]]:
         guild_cfg = await self.db.get_guild_config(guild.id)
         issues: list[str] = []
+        missing: list[str] = []
         ok_lines: list[str] = []
         repair_channel_id: Optional[int] = None
 
@@ -467,6 +544,12 @@ class Admin(commands.Cog, name="Admin"):
                             ok_lines.append("Webhook avatar delivery test passed.")
                         else:
                             issues.append(f"Webhook avatar delivery test failed: {avatar_issue}.")
+            else:
+                stored_webhook = await self.db.get_relay_webhook(channel.id)
+                if stored_webhook:
+                    ok_lines.append(
+                        "An existing relay webhook is saved and can keep working, but automatic replacement is unavailable."
+                    )
         q = await self.db.get_queue_entry(channel_id)
         conn = await self.db.get_connection(channel_id)
         room_member = await self.db.get_room_member(channel_id)
@@ -494,10 +577,9 @@ class Admin(commands.Cog, name="Admin"):
             embed.add_field(
                 name="Next Step",
                 value=(
-                    "Run `f.repair` to rebuild the damaged setup. Active calls, queue searches, and rooms must end first.\n\n"
-                    "If it reports missing permissions, re-invite Fliphone first. If the same permission is still "
-                    "missing, that channel or its category is explicitly denying it; allow Fliphone there or use "
-                    "another channel."
+                    self._permission_recovery_guidance(guild, probe_user, channel, missing)
+                    if missing and probe_user
+                    else "Run `f.repair` to rebuild the damaged setup after active calls, searches, and rooms end."
                 ),
                 inline=False,
             )
@@ -527,10 +609,8 @@ class Admin(commands.Cog, name="Admin"):
                 title="Setup Needs Permissions",
                 description=(
                     f"Fliphone is missing: **{', '.join(permission_issues)}**\n\n"
-                    f"**[Re-invite Fliphone with the correct permissions]({self._invite_url(guild.id)})**, "
-                    "then run `f.setup` again here.\n\n"
-                    "If the same permission is still missing after reinviting, this channel or its category has "
-                    "an override denying it. Allow Fliphone's role there, or run `f.setup` in another channel."
+                    f"{self._permission_recovery_guidance(guild, user, target, permission_issues)}\n\n"
+                    "After permissions are fixed, run `f.setup` again in this channel."
                 ),
                 color=config.COLOR_ERR,
             )
@@ -589,7 +669,7 @@ class Admin(commands.Cog, name="Admin"):
 
     # ── f.setup ───────────────────────────────────────────────────────────────
 
-    @commands.command(name="setup")
+    @commands.hybrid_command(name="setup")
     @commands.guild_only()
     @commands.has_permissions(manage_channels=True)
     async def setup(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None) -> None:
@@ -645,7 +725,7 @@ class Admin(commands.Cog, name="Admin"):
 
     # ── f.teardown ────────────────────────────────────────────────────────────
 
-    @commands.command(name="check", aliases=["setupcheck", "doctor"])
+    @commands.hybrid_command(name="check", aliases=["setupcheck", "doctor"])
     @commands.guild_only()
     @commands.has_permissions(manage_channels=True)
     async def check(self, ctx: commands.Context) -> None:
@@ -654,7 +734,7 @@ class Admin(commands.Cog, name="Admin"):
         view = SetupCheckView(self, repair_channel_id) if repair_channel_id else None
         await ctx.send(embed=embed, view=view)
 
-    @commands.command(name="repair", aliases=["fixsetup", "fix"])
+    @commands.hybrid_command(name="repair", aliases=["fixsetup", "fix"])
     @commands.guild_only()
     @commands.has_permissions(manage_channels=True)
     async def repair(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None) -> None:
@@ -824,6 +904,38 @@ class Admin(commands.Cog, name="Admin"):
             ),
             inline=False,
         )
+        embed.add_field(
+            name="Permission Note",
+            value=(
+                "Channel and category overrides can still hide Fliphone after installation. "
+                "If setup reports an override, a server owner or someone with Manage Roles must allow "
+                "Fliphone in that channel/category."
+            ),
+            inline=False,
+        )
+        if isinstance(ctx.author, discord.Member):
+            member_permissions = ctx.author.guild_permissions
+            requested = {
+                "View Channels": member_permissions.view_channel,
+                "Send Messages": member_permissions.send_messages,
+                "Manage Webhooks": member_permissions.manage_webhooks,
+                "Embed Links": member_permissions.embed_links,
+                "Attach Files": member_permissions.attach_files,
+                "Read Message History": member_permissions.read_message_history,
+                "Add Reactions": member_permissions.add_reactions,
+            }
+            cannot_grant = [name for name, allowed in requested.items() if not allowed]
+            if cannot_grant and not member_permissions.administrator:
+                embed.add_field(
+                    name="You Cannot Grant Every Permission",
+                    value=(
+                        "Discord will omit **"
+                        + ", ".join(cannot_grant)
+                        + "** if you authorize this invite. Send the invite link to the server owner or an "
+                        "admin who has those permissions instead."
+                    ),
+                    inline=False,
+                )
         embed.add_field(
             name="Support Server",
             value="[Join here](https://discord.gg/t3KHGqPuEP)",

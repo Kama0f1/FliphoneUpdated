@@ -1465,7 +1465,7 @@ class Room(commands.Cog):
             await finish(
                 "❌ Fliphone cannot join a room because webhook relay is unavailable.\n"
                 f"Missing or broken: **{', '.join(permission_issues)}**\n"
-                "A server admin should run `f.setup` in this channel."
+                "A server admin should run `/check` or `f.check` in this channel."
             )
             return
 

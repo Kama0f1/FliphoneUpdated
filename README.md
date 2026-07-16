@@ -49,6 +49,12 @@ Messages are relayed in real time. A short in-memory rolling excerpt is kept tem
 | Read Message History | Webhook lookup and reply context |
 | Add Reactions | Relaying standard emoji reactions |
 
+Discord may let someone with **Manage Server** authorize the app while omitting requested permissions that person
+cannot grant. If the authorization screen places **Manage Webhooks** under "you can't grant them," cancel and have
+the server owner or an admin with Manage Webhooks use the invite. Channel and category overrides can also deny
+permissions afterward. If Fliphone appears offline or cannot see a channel, allow its role in that channel/category;
+an owner or moderator with **Manage Roles** may be required to edit the overwrite.
+
 ### 2. Set up your channel
 
 In the channel you want to use as the phonebooth, run:
@@ -57,9 +63,12 @@ In the channel you want to use as the phonebooth, run:
 f.setup
 ```
 
+You can also use `/setup`. Use `/check` for an exact permission diagnosis and `/repair` after correcting permissions.
+
 `f.setup` is also the reset button: it clears stale call/queue/room state, removes old Fliphone webhooks, creates a fresh webhook, saves the channel, and tests avatar delivery.
 
-If setup reports missing permissions, use the re-invite link it provides and run `f.setup` again. Use `f.teardown` only when you want to remove Fliphone completely.
+If setup says the server role is missing permissions, use the re-invite link. If it says a channel/category is
+overriding permissions, fix that overwrite instead. Use `f.teardown` only when you want to remove Fliphone completely.
 
 ### 3. Start a call
 
@@ -144,7 +153,8 @@ Server A  ◄──relay──   Bot  ──relay──►  Server B
 ### Relay priority
 
 1. **Webhook relay** — message appears with the sender's filtered display name and avatar.
-2. If webhook permissions break, Fliphone repairs the webhook or safely stops the call instead of exposing messages through a plain bot fallback.
+2. Fliphone saves each channel's webhook and can keep using a valid existing webhook if Manage Webhooks is later removed.
+3. If a webhook itself breaks, Fliphone repairs it when Manage Webhooks is available or safely stops the call instead of exposing messages through a plain bot fallback.
 
 ### What gets relayed
 
