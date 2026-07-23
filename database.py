@@ -40,6 +40,7 @@ TABLE_ORDER = [
     "user_chat_stats",
     "server_chat_stats",
     "scheduled_jobs",
+    "shutdown_announcements",
     "gif_url_list",
     "gif_mode_settings",
     "user_preferences",
@@ -206,6 +207,14 @@ CREATE INDEX IF NOT EXISTS idx_server_chat_stats_rank
 CREATE TABLE IF NOT EXISTS scheduled_jobs (
     job_key     TEXT PRIMARY KEY,
     next_run_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS shutdown_announcements (
+    guild_id    INTEGER PRIMARY KEY,
+    channel_id  INTEGER NOT NULL,
+    message_id  INTEGER,
+    claimed_at  TEXT NOT NULL,
+    sent_at     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS gif_url_list (
@@ -463,6 +472,14 @@ CREATE INDEX IF NOT EXISTS idx_server_chat_stats_rank
 CREATE TABLE IF NOT EXISTS scheduled_jobs (
     job_key     TEXT PRIMARY KEY,
     next_run_at DOUBLE PRECISION NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS shutdown_announcements (
+    guild_id    BIGINT PRIMARY KEY,
+    channel_id  BIGINT NOT NULL,
+    message_id  BIGINT,
+    claimed_at  TEXT NOT NULL,
+    sent_at     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS gif_url_list (
@@ -869,6 +886,9 @@ class Database:
 
     async def get_guild_config(self, guild_id: int) -> Optional[dict]:
         return await self._fetchrow("SELECT * FROM guild_config WHERE guild_id = ?", (guild_id,))
+
+    async def get_all_guild_configs(self) -> list[dict]:
+        return await self._fetchall("SELECT * FROM guild_config ORDER BY guild_id")
 
     async def get_config_by_channel(self, channel_id: int) -> Optional[dict]:
         return await self._fetchrow("SELECT * FROM guild_config WHERE channel_id = ?", (channel_id,))
@@ -2241,6 +2261,47 @@ class Database:
             (next_run_at, job_key, now),
         )
         return claimed > 0
+
+    async def claim_shutdown_announcement(self, guild_id: int, channel_id: int) -> bool:
+        inserted = await self._execute(
+            """
+            INSERT INTO shutdown_announcements (guild_id, channel_id, claimed_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(guild_id) DO NOTHING
+            """,
+            (guild_id, channel_id, datetime.utcnow().isoformat()),
+        )
+        return inserted > 0
+
+    async def complete_shutdown_announcement(
+        self,
+        guild_id: int,
+        channel_id: int,
+        message_id: int,
+    ) -> None:
+        await self._execute(
+            """
+            UPDATE shutdown_announcements
+            SET channel_id = ?, message_id = ?, sent_at = ?
+            WHERE guild_id = ?
+            """,
+            (channel_id, message_id, datetime.utcnow().isoformat(), guild_id),
+        )
+
+    async def release_shutdown_announcement(self, guild_id: int) -> None:
+        await self._execute(
+            """
+            DELETE FROM shutdown_announcements
+            WHERE guild_id = ? AND sent_at IS NULL
+            """,
+            (guild_id,),
+        )
+
+    async def get_shutdown_announcement(self, guild_id: int) -> Optional[dict]:
+        return await self._fetchrow(
+            "SELECT * FROM shutdown_announcements WHERE guild_id = ?",
+            (guild_id,),
+        )
 
     async def add_call_report(
         self,

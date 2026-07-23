@@ -1,4 +1,6 @@
 import os
+from datetime import datetime
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -25,6 +27,24 @@ DATABASE_URL: str   = os.getenv("DATABASE_URL", "")
 DATABASE_POOL_SIZE: int = int(os.getenv("DATABASE_POOL_SIZE", "5"))
 # Disable asyncpg's prepared statement cache by default for PgBouncer/pooler compatibility.
 PG_STATEMENT_CACHE_SIZE: int = int(os.getenv("PG_STATEMENT_CACHE_SIZE", "0"))
+
+# Planned service shutdown. The notice cog sends one announcement per configured
+# server channel and records delivery so restarts cannot repeat it.
+SHUTDOWN_NOTICE_ENABLED: bool = os.getenv("SHUTDOWN_NOTICE_ENABLED", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+SHUTDOWN_DATE: str = os.getenv("SHUTDOWN_DATE", "2026-08-20")
+
+
+def shutdown_date_label() -> str:
+    try:
+        value = datetime.strptime(SHUTDOWN_DATE, "%Y-%m-%d")
+    except ValueError:
+        return SHUTDOWN_DATE
+    return f"{value.strftime('%B')} {value.day}, {value.year}"
 
 # ── Queue ─────────────────────────────────────────────────────────────────────
 QUEUE_TIMEOUT: int  = int(os.getenv("QUEUE_TIMEOUT", "10"))   # minutes

@@ -135,6 +135,7 @@ class PhoneboothBot(commands.AutoShardedBot):
         await self.load_extension("cogs.room")
         await self.load_extension("cogs.vote")
         await self.load_extension("cogs.report")
+        await self.load_extension("cogs.shutdown_notice")
         from cogs.phonebooth import GifReportLogView, GifReportView
         self.add_view(GifReportLogView())
         self.add_view(GifReportView())
@@ -167,11 +168,18 @@ class PhoneboothBot(commands.AutoShardedBot):
     # ── Presence ──────────────────────────────────────────────────────────────
 
     async def _update_presence(self) -> None:
-        await self.change_presence(
-            activity=discord.Activity(
+        if config.SHUTDOWN_NOTICE_ENABLED:
+            activity = discord.Activity(
+                type=discord.ActivityType.watching,
+                name=f"Shutting down {config.shutdown_date_label()}",
+            )
+        else:
+            activity = discord.Activity(
                 type=discord.ActivityType.listening,
                 name=f"f.call  •  {len(self.guilds)} servers  •  Fliphone",
             )
+        await self.change_presence(
+            activity=activity,
         )
 
     @tasks.loop(hours=1)
