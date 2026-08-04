@@ -8,6 +8,7 @@ import discord
 from discord.ext import commands
 
 import config
+from access_control import is_trusted_moderator, trusted_moderator_only
 
 
 CALL_COMMANDS = [
@@ -46,31 +47,31 @@ ADMIN_COMMANDS = [
     ("setup", "/setup", "Reset and configure Fliphone in one step."),
     ("check", "/check", "Diagnose permissions, webhook, and current state."),
     ("repair", "/repair", "Rebuild a damaged setup."),
-    ("teardown", "@Fliphone teardown", "Remove setup after confirmation."),
+    ("teardown", "/teardown", "Remove setup after button confirmation."),
     ("blocklist", "/blocklist", "List servers blocked by this server."),
     ("unblock", "/unblock", "Remove a server block."),
     ("kick", "/kick", "End the call in the channel where it is run."),
 ]
 
 SUDO_COMMANDS = [
-    ("sudohelp", "@Fliphone sudohelp", "Show restricted tools."),
-    ("dbstatus", "@Fliphone dbstatus", "Check safe database health and row counts."),
-    ("ban", "@Fliphone ban <user_id> [reason]", "Apply a bot-wide user ban."),
-    ("unban", "@Fliphone unban <user_id>", "Remove a bot-wide user ban."),
-    ("serverban", "@Fliphone serverban <server_id> [reason]", "Ban a server and remove Fliphone from it."),
-    ("serverunban", "@Fliphone serverunban <server_id>", "Remove a bot-wide server ban."),
-    ("notifyignore", "@Fliphone notifyignore <user_id>", "Exclude a tester from queue broadcasts."),
-    ("servers", "@Fliphone servers", "List servers containing the bot."),
-    ("leaveserver", "@Fliphone leaveserver <server_id>", "Force the bot to leave a server."),
-    ("censor", "@Fliphone censor <word>", "Toggle a custom censored word."),
-    ("censorlist", "@Fliphone censorlist", "List custom censored words."),
-    ("gifreports", "@Fliphone gifreports", "Review reported GIFs."),
-    ("gifbl", "@Fliphone gifbl <id or url>", "Blacklist a GIF report or URL."),
-    ("gifwl", "@Fliphone gifwl <id or url>", "Whitelist a GIF report or URL."),
-    ("gifcheck", "@Fliphone gifcheck <url>", "Check GIF whitelist/blacklist status."),
-    ("emojicleanup", "@Fliphone emojicleanup [days] [limit]", "Delete unused or stale mirrored app emojis."),
-    ("userreports", "@Fliphone userreports", "Review conversation reports."),
-    ("resolvereport", "@Fliphone resolvereport <id>", "Resolve a conversation report."),
+    ("sudohelp", "/sudohelp", "Show restricted tools."),
+    ("dbstatus", "/dbstatus", "Check safe database health and row counts."),
+    ("ban", "/ban", "Apply a bot wide user ban."),
+    ("unban", "/unban", "Remove a bot wide user ban."),
+    ("serverban", "/serverban", "Ban a server and remove Fliphone from it."),
+    ("serverunban", "/serverunban", "Remove a bot wide server ban."),
+    ("notifyignore", "/notifyignore", "Exclude a tester from queue broadcasts."),
+    ("servers", "/servers", "List servers containing the bot."),
+    ("leaveserver", "/leaveserver", "Force the bot to leave a server."),
+    ("censor", "/censor", "Toggle a custom censored word."),
+    ("censorlist", "/censorlist", "List custom censored words."),
+    ("gifreports", "/gifreports", "Review reported GIFs."),
+    ("gifbl", "/gifbl", "Blacklist a GIF report or URL."),
+    ("gifwl", "/gifwl", "Whitelist a GIF report or URL."),
+    ("gifcheck", "/gifcheck", "Check GIF whitelist or blacklist status."),
+    ("emojicleanup", "/emojicleanup", "Delete unused or stale mirrored app emojis."),
+    ("userreports", "/userreports", "Review conversation reports."),
+    ("resolvereport", "/resolvereport", "Resolve a conversation report."),
 ]
 
 PUBLIC_ALIASES = {
@@ -154,7 +155,7 @@ def _page_embed(page: int) -> discord.Embed:
             color=config.COLOR_WAIT,
         )
         _add_command_fields(embed, "Commands", ADMIN_COMMANDS)
-    embed.set_footer(text="Use /help for details. Restricted tools use @Fliphone commands.")
+    embed.set_footer(text="Use /help for details. Restricted tools require trusted staff access.")
     return embed
 
 
@@ -195,7 +196,7 @@ class Help(commands.Cog):
         self.bot = bot
 
     async def _can_use_sudohelp(self, ctx: commands.Context) -> bool:
-        return await self.bot.is_owner(ctx.author) or ctx.author.id in config.TRUSTED_MOD_IDS
+        return await is_trusted_moderator(self.bot, ctx.author)
 
     @commands.hybrid_command(name="help", aliases=["commands", "cmds"])
     async def help(self, ctx: commands.Context, *, command: Optional[str] = None) -> None:
@@ -212,13 +213,14 @@ class Help(commands.Cog):
             return
         await ctx.send(embed=_page_embed(0), view=HelpView())
 
-    @commands.command(name="sudohelp", aliases=["ownerhelp", "modhelp"])
+    @commands.hybrid_command(name="sudohelp", aliases=["ownerhelp", "modhelp"])
+    @trusted_moderator_only()
     async def sudohelp(self, ctx: commands.Context, *, command: Optional[str] = None) -> None:
         if not await self._can_use_sudohelp(ctx):
             await ctx.send("You do not have permission to view restricted commands.")
             return
         if command:
-            key = command.strip().lower().removeprefix("@fliphone ")
+            key = command.strip().lower().removeprefix("/")
             key = SUDO_ALIASES.get(key, key)
             entry = ALL_SUDO.get(key)
             if not entry:

@@ -1,5 +1,29 @@
 # Fliphone Update Log
 
+## August 2026 Privacy And Commands Update
+
+* Fliphone now uses slash commands for all public controls, setup tools, reports, and restricted moderation tools.
+
+* Restricted moderation commands check the caller against the trusted staff user ID list. Unauthorized users cannot use the commands or their review panels.
+
+* `/teardown` now uses Confirm and Cancel buttons instead of asking administrators to type a confirmation message.
+
+* Message processing is limited to administrator configured Fliphone channels while a call or room is active. Messages in unrelated or inactive channels are ignored.
+
+* `/privacy optout` prevents your future messages from being relayed or included in new report context. `/privacy optin` enables participation again.
+
+* Reports no longer depend on a stored conversation buffer. When `/report` is submitted, Fliphone fetches limited context from Discord, sends up to 50 relevant messages to the private moderation channel, and discards the context locally.
+
+* Private report evidence is scheduled for deletion when the report is resolved or after 30 days.
+
+* GIF and custom emoji submissions now use slash command fields. `/addemoji` and `/addemojis` both accept up to five custom emojis at once.
+
+* Existing server setup, call history, profiles, moderation records, GIF reviews, emoji reviews, and other database records are preserved.
+
+## Historical Update And Testing Notes
+
+The sections below are retained from the earlier update cycle for project history. Some command names shown there use the former `f.` format and have since moved to slash commands.
+
 ## User-Facing Update Post
 
 Fliphone QOL update.

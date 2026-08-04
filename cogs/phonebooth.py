@@ -299,7 +299,7 @@ class GifReportView(discord.ui.View):
                 )
                 log_embed.add_field(name="Report ID", value=f"#{report_id}", inline=True)
                 log_embed.set_footer(
-                    text=f"f.gifbl {report_id} → blacklist  |  f.gifwl {report_id} → whitelist  |  {config.FOOTER}"
+                    text=f"Use /gifbl or /gifwl with report ID {report_id}  |  {config.FOOTER}"
                 )
                 try:
                     review_message = await log_ch.send(embed=log_embed, view=GifReportLogView())

@@ -4,8 +4,8 @@ cogs/report.py - General call/conversation report system for Fliphone.
 Commands
 --------
 /report                     - Report your most recent or active call
-@Fliphone userreports       - List open call reports [owner + trusted mods]
-@Fliphone resolvereport     - Mark a report as resolved [owner + trusted mods]
+/userreports                - List open call reports [owner + trusted mods]
+/resolvereport              - Mark a report as resolved [owner + trusted mods]
 
 How it works
 ------------
@@ -29,6 +29,7 @@ import discord
 from discord.ext import commands, tasks
 
 import config
+from access_control import trusted_moderator_only
 from database import Database
 from relay_policy import is_local_only
 
@@ -661,7 +662,7 @@ class Report(commands.Cog):
         log_embed.set_footer(
             text=(
                 f"Context was fetched only when this report was submitted | "
-                f"@Fliphone resolvereport {report_id} to close"
+                f"/resolvereport {report_id} to close"
             )
         )
 
@@ -700,7 +701,8 @@ class Report(commands.Cog):
 
     # ── f.userreports ─────────────────────────────────────────────────────────
 
-    @commands.command(name="userreports")
+    @commands.hybrid_command(name="userreports")
+    @trusted_moderator_only()
     async def userreports(self, ctx: commands.Context) -> None:
         """[Mods] List all open call reports."""
         admin_cog = self.bot.get_cog("Admin")
@@ -790,10 +792,11 @@ class Report(commands.Cog):
             description="\n".join(lines),
             color=config.COLOR_WARN,
         )
-        embed.set_footer(text="Use the select menu/button, or @Fliphone resolvereport <id>.")
+        embed.set_footer(text="Use the select menu/button, or /resolvereport.")
         return embed
 
-    @commands.command(name="resolvereport")
+    @commands.hybrid_command(name="resolvereport")
+    @trusted_moderator_only()
     async def resolvereport(self, ctx: commands.Context, report_id: int) -> None:
         """[Mods] Mark a call report as resolved."""
         admin_cog = self.bot.get_cog("Admin")

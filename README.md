@@ -68,7 +68,7 @@ Use `/check` for an exact permission diagnosis and `/repair` after correcting pe
 `/setup` is also the reset button: it clears stale call/queue/room state, removes old Fliphone webhooks, creates a fresh webhook, saves the channel, and tests avatar delivery.
 
 If setup says the server role is missing permissions, use the re-invite link. If it says a channel/category is
-overriding permissions, fix that overwrite instead. Use `@Fliphone teardown` only when you want to remove Fliphone completely.
+overriding permissions, fix that overwrite instead. Use `/teardown` only when you want to remove Fliphone completely.
 
 ### 3. Start a call
 
@@ -82,7 +82,7 @@ If another server is waiting, you connect instantly. Otherwise you join the queu
 
 ## Command Reference
 
-Public commands use Discord application commands. Restricted maintenance commands use `@Fliphone command`.
+Public and restricted controls use Discord application commands. Restricted tools verify the caller against the trusted staff list.
 
 ### 📞 Calling
 
@@ -122,8 +122,8 @@ Public commands use Discord application commands. Restricted maintenance command
 | `/setup` | Manage Channels | Reset and fully configure this channel in one step |
 | `/check` | Manage Channels | Diagnose setup, permissions, webhook, and call state |
 | `/repair` | Manage Channels | Reset and rebuild the configured channel |
-| `@Fliphone dbstatus` | Trusted staff | Show database health and safe row counts |
-| `@Fliphone teardown` | Manage Channels | Remove Fliphone from this server |
+| `/dbstatus` | Trusted staff | Show database health and safe row counts |
+| `/teardown` | Manage Channels | Remove Fliphone from this server after button confirmation |
 | `/blocklist` | Manage Channels | List servers your server has blocked |
 | `/unblock` | Manage Channels | Unblock a server by its ID |
 | `/kick` | Manage Channels | Force-disconnect the active call |
@@ -131,7 +131,7 @@ Public commands use Discord application commands. Restricted maintenance command
 ### Restricted Tools
 
 Owner and trusted moderator commands are intentionally hidden from normal help.
-Use `@Fliphone sudohelp` to view moderation panels, GIF review tools, global bans,
+Use `/sudohelp` to view moderation panels, GIF review tools, global bans,
 censor controls, and guild audit tools.
 
 ---
@@ -280,7 +280,7 @@ Enable these in the [Discord Developer Portal](https://discord.com/developers/ap
 | `call_history` | Completed calls (used for stats) |
 | `blocked_guilds` | Server-level block list |
 | `banned_users` | Bot-wide user ban list |
-| `custom_words` | Custom censor words added with the restricted `@Fliphone censor` command |
+| `custom_words` | Custom censor words added with the restricted `/censor` command |
 | `gif_reports` | GIF URLs reported by users, pending review |
 | `profile_banners` | Saved user profile banner choices |
 | `user_chat_stats` | Global user XP, chat count, and ranking data |

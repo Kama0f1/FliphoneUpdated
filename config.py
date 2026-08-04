@@ -137,8 +137,7 @@ COLOR_ERR    = 0xFF6B6B
 FOOTER       = "Fliphone • Cross-server chat roulette"
 
 # ── Trusted moderators ───────────────────────────────────────────────────────
-# These user IDs can run f.gifbl, f.gifwl, f.gifcheck, and f.reports
-# even without being the bot owner.
+# These user IDs can run restricted slash commands without being the bot owner.
 TRUSTED_MOD_IDS: set[int] = {
     1129160384956342273,
     944227083117297674,
@@ -147,8 +146,7 @@ TRUSTED_MOD_IDS: set[int] = {
 }
 TRUSTED_MOD_IDS.discard(723239598343454831)
 
-# These guild IDs grant all members with administrator permission the same
-# GIF moderation rights as TRUSTED_MOD_IDS.
+# Reserved for future support server command scoping.
 TRUSTED_GUILD_IDS: set[int] = {
     1489521749115801651,  # admin server
 }

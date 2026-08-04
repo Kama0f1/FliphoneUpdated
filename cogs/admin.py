@@ -1,8 +1,7 @@
 """
 cogs/admin.py – Admin/setup/moderation commands for Phonebooth V2.
 
-Public setup commands use Discord slash commands. Restricted maintenance commands
-must mention Fliphone, for example: @Fliphone dbstatus.
+Public setup and restricted maintenance tools use Discord slash commands.
 """
 
 from __future__ import annotations
@@ -16,6 +15,7 @@ import discord
 from discord.ext import commands
 
 import config
+from access_control import is_trusted_moderator, owner_only, trusted_moderator_only
 from database import Database, TABLE_ORDER
 
 
@@ -45,6 +45,45 @@ class SetupCheckView(discord.ui.View):
 
         embed = await self.cog._repair_setup(interaction.guild, interaction.user, channel)
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+class TeardownConfirmView(discord.ui.View):
+    def __init__(self, cog: "Admin", requester_id: int) -> None:
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.requester_id = requester_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.requester_id:
+            return True
+        await interaction.response.send_message(
+            "Only the administrator who started this teardown can confirm it.",
+            ephemeral=True,
+        )
+        return False
+
+    @discord.ui.button(label="Confirm Removal", style=discord.ButtonStyle.danger)
+    async def confirm(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        if not interaction.guild:
+            await interaction.response.send_message("This server is unavailable.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        result = await self.cog._teardown_guild(interaction.guild, interaction.channel)
+        await interaction.edit_original_response(content=result, embed=None, view=None)
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(content="Teardown cancelled.", embed=None, view=None)
+        self.stop()
 
 
 class GifReportSelect(discord.ui.Select):
@@ -735,8 +774,9 @@ class Admin(commands.Cog, name="Admin"):
         embed = await self._repair_setup(ctx.guild, ctx.author, target)
         await ctx.send(embed=embed)
 
-    @commands.command(name="dbstatus", aliases=["database", "db"])
+    @commands.hybrid_command(name="dbstatus", aliases=["database", "db"])
     @commands.guild_only()
+    @trusted_moderator_only()
     async def dbstatus(self, ctx: commands.Context) -> None:
         """Show database backend health without exposing private data."""
         if not await self._is_global_mod(ctx.author, ctx.guild):
@@ -799,36 +839,33 @@ class Admin(commands.Cog, name="Admin"):
         embed.set_footer(text=config.FOOTER)
         await ctx.send(embed=embed)
 
-    @commands.command(name="teardown", aliases=["remove"])
+    async def _teardown_guild(
+        self,
+        guild: discord.Guild,
+        channel: Optional[discord.abc.GuildChannel],
+    ) -> str:
+        lock = self._setup_locks.setdefault(guild.id, asyncio.Lock())
+        async with lock:
+            guild_cfg = await self.db.get_guild_config(guild.id)
+            if not guild_cfg:
+                await self._delete_fliphone_webhooks(
+                    channel if isinstance(channel, discord.TextChannel) else None
+                )
+                return "📵 Fliphone was already unconfigured. Any webhook in this channel was cleaned up."
+
+            await self._clear_guild_setup_state(guild, notify_partner=True)
+            return "📵 Fliphone was fully removed. Run `/setup` in the channel you want to use."
+
+    @commands.hybrid_command(name="teardown", aliases=["remove"])
     @commands.guild_only()
     @commands.has_permissions(manage_channels=True)
     async def teardown(self, ctx: commands.Context) -> None:
         """Completely remove Fliphone state so the next /setup starts clean."""
-        await ctx.send("Type `confirm` within 20 seconds to remove all Fliphone setup for this server.")
-        try:
-            confirmation = await self.bot.wait_for(
-                "message",
-                timeout=20,
-                check=lambda message: message.author == ctx.author and message.channel == ctx.channel,
-            )
-        except asyncio.TimeoutError:
-            await ctx.send("Teardown cancelled.")
-            return
-        if confirmation.content.strip().lower() != "confirm":
-            await ctx.send("Teardown cancelled.")
-            return
-        lock = self._setup_locks.setdefault(ctx.guild.id, asyncio.Lock())
-        async with lock:
-            guild_cfg = await self.db.get_guild_config(ctx.guild.id)
-            if not guild_cfg:
-                await self._delete_fliphone_webhooks(
-                    ctx.channel if isinstance(ctx.channel, discord.TextChannel) else None
-                )
-                await ctx.send("📵 Fliphone was already unconfigured. Any webhook in this channel was cleaned up.")
-                return
-
-            await self._clear_guild_setup_state(ctx.guild, notify_partner=True)
-            await ctx.send("📵 Fliphone was fully removed. Run `/setup` in the channel you want to use.")
+        await ctx.send(
+            "Confirm that you want to remove all active Fliphone setup from this server.",
+            view=TeardownConfirmView(self, ctx.author.id),
+            ephemeral=ctx.interaction is not None,
+        )
 
     # ── f.stats ───────────────────────────────────────────────────────────────
 
@@ -999,12 +1036,13 @@ class Admin(commands.Cog, name="Admin"):
 
     # ── f.censor ──────────────────────────────────────────────────────────────
 
-    @commands.command(name="censor")
+    @commands.hybrid_command(name="censor")
+    @trusted_moderator_only()
     async def censor(self, ctx, *, word: str) -> None:
         """
         [Bot owner + trusted mods] Add or remove a word from the censor list.
         If the word is already censored, it will be removed (toggle).
-        Usage: @Fliphone censor <word or phrase>
+        Usage: /censor
         """
         if not await self._is_global_mod(ctx.author, ctx.guild):
             await ctx.send("❌ Only the bot owner and trusted mods can use this command.")
@@ -1038,7 +1076,8 @@ class Admin(commands.Cog, name="Admin"):
                 )
             )
 
-    @commands.command(name="censorlist")
+    @commands.hybrid_command(name="censorlist")
+    @trusted_moderator_only()
     async def censorlist(self, ctx) -> None:
         """[Bot owner + trusted mods] List all custom censored words."""
         if not await self._is_global_mod(ctx.author, ctx.guild):
@@ -1066,7 +1105,8 @@ class Admin(commands.Cog, name="Admin"):
 
     # ── f.ban ─────────────────────────────────────────────────────────────────
 
-    @commands.command(name="ban")
+    @commands.hybrid_command(name="ban")
+    @trusted_moderator_only()
     async def ban_user(self, ctx: commands.Context, user_id: int, *, reason: str = "No reason given") -> None:
         """[Bot owner + trusted mods] Ban a user ID across all servers."""
         if not await self._is_global_mod(ctx.author, ctx.guild):
@@ -1076,7 +1116,7 @@ class Admin(commands.Cog, name="Admin"):
         if guild:
             await ctx.send(
                 f"⚠️ `{user_id}` is the server ID for **{guild.name}**, not a user ID. "
-                f"Use `@Fliphone serverban {user_id} <reason>` to ban that server."
+                f"Use `/serverban` with server ID `{user_id}` to ban that server."
             )
             return
         await self.db.ban_user(user_id, ctx.author.id, reason)
@@ -1086,7 +1126,8 @@ class Admin(commands.Cog, name="Admin"):
 
     # ── f.unban ───────────────────────────────────────────────────────────────
 
-    @commands.command(name="unban")
+    @commands.hybrid_command(name="unban")
+    @trusted_moderator_only()
     async def unban_user(self, ctx: commands.Context, user_id: int) -> None:
         """[Bot owner + trusted mods] Unban a user from Phonebooth."""
         if not await self._is_global_mod(ctx.author, ctx.guild):
@@ -1118,18 +1159,12 @@ class Admin(commands.Cog, name="Admin"):
         user: discord.abc.User,
         guild: Optional[discord.Guild],
     ) -> bool:
-        if await self.bot.is_owner(user):
-            return True
-        if user.id in config.TRUSTED_MOD_IDS:
-            return True
-        if not isinstance(user, discord.Member):
-            return False
-        return False
+        return await is_trusted_moderator(self.bot, user)
 
     # ── f.notifyignore ────────────────────────────────────────────────────────
 
-    @commands.command(name="notifyignore")
-    @commands.is_owner()
+    @commands.hybrid_command(name="notifyignore")
+    @owner_only()
     async def notifyignore(self, ctx: commands.Context, user_id: int) -> None:
         """[Bot owner only] Toggle a user ID on/off the notify ignore list (e.g. testers)."""
         if user_id in config.NOTIFY_IGNORE_IDS:
@@ -1141,7 +1176,8 @@ class Admin(commands.Cog, name="Admin"):
 
     # ── f.gifreports ──────────────────────────────────────────────────────────
 
-    @commands.command(name="gifreports")
+    @commands.hybrid_command(name="gifreports")
+    @trusted_moderator_only()
     async def gifreports(self, ctx: commands.Context) -> None:
         """[GIF mods] List all GIF reports awaiting review."""
         if not await self._is_gif_mod(ctx):
@@ -1172,7 +1208,7 @@ class Admin(commands.Cog, name="Admin"):
             color=config.COLOR_WARN,
         )
         embed.set_footer(
-            text="@Fliphone gifbl <id or url> to blacklist | @Fliphone gifwl <id or url> to whitelist"
+            text="Use /gifbl to blacklist or /gifwl to whitelist"
         )
         await ctx.send(embed=embed)
 
@@ -1208,10 +1244,11 @@ class Admin(commands.Cog, name="Admin"):
                 value=f"{len(pending) - 10} more pending. Use the select menu to inspect them.",
                 inline=False,
             )
-        embed.set_footer(text="Use the buttons, or mention Fliphone with gifbl/gifwl and an ID or URL.")
+        embed.set_footer(text="Use the buttons, /gifbl, or /gifwl.")
         return embed
 
-    @commands.command(name="gifbl")
+    @commands.hybrid_command(name="gifbl")
+    @trusted_moderator_only()
     async def gifbl(self, ctx: commands.Context, *, id_or_url: str) -> None:
         """[GIF mods] Blacklist a GIF URL. Pass a report ID or full URL."""
         if not await self._is_gif_mod(ctx):
@@ -1237,7 +1274,8 @@ class Admin(commands.Cog, name="Admin"):
 
     # ── f.gifwl ───────────────────────────────────────────────────────────────
 
-    @commands.command(name="gifwl")
+    @commands.hybrid_command(name="gifwl")
+    @trusted_moderator_only()
     async def gifwl(self, ctx: commands.Context, *, id_or_url: str) -> None:
         """[GIF mods] Whitelist a GIF URL. Pass a report ID or full URL."""
         if not await self._is_gif_mod(ctx):
@@ -1263,7 +1301,8 @@ class Admin(commands.Cog, name="Admin"):
 
     # ── f.gifcheck ────────────────────────────────────────────────────────────
 
-    @commands.command(name="gifcheck")
+    @commands.hybrid_command(name="gifcheck")
+    @trusted_moderator_only()
     async def gifcheck(self, ctx: commands.Context, *, url: str) -> None:
         """[GIF mods] Check whether a URL is on the blacklist or whitelist."""
         if not await self._is_gif_mod(ctx):
@@ -1297,62 +1336,9 @@ class Admin(commands.Cog, name="Admin"):
         else:
             await ctx.send(
                 f"❌ Pass a report ID (number) or a full URL starting with `http`.\n"
-                f"Example: `@Fliphone gif{action[:2]} 42` or mention Fliphone with a full URL."
+                f"Use `/gif{action[:2]}` with a report ID or full URL."
             )
             return None
-    # ── f.pb (legacy group kept for backwards compat) ─────────────────────────
-
-    @commands.group(name="pb", invoke_without_command=True, case_insensitive=True)
-    async def pb(self, ctx: commands.Context) -> None:
-        """Legacy Phonebooth admin command group."""
-        await ctx.send(
-            "📞 **Phonebooth V2** — Commands:\n"
-            "`/call` `/hangup` `/skip` `/block` `/friendrequest` `/anon`\n"
-            "`/setup` `/check` `/repair` `@Fliphone dbstatus` `@Fliphone teardown`\n"
-            "`/stats` `/invite` `/blocklist` `/unblock` `/kick`"
-        )
-
-    @pb.command(name="setup")
-    @commands.guild_only()
-    @commands.has_permissions(manage_channels=True)
-    async def pb_setup(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None) -> None:
-        await ctx.invoke(self.setup, channel=channel)
-
-    @pb.command(name="check")
-    @commands.guild_only()
-    @commands.has_permissions(manage_channels=True)
-    async def pb_check(self, ctx: commands.Context) -> None:
-        await ctx.invoke(self.check)
-
-    @pb.command(name="repair")
-    @commands.guild_only()
-    @commands.has_permissions(manage_channels=True)
-    async def pb_repair(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None) -> None:
-        await ctx.invoke(self.repair, channel=channel)
-
-    @pb.command(name="dbstatus")
-    @commands.guild_only()
-    async def pb_dbstatus(self, ctx: commands.Context) -> None:
-        await ctx.invoke(self.dbstatus)
-
-    @pb.command(name="teardown")
-    @commands.guild_only()
-    @commands.has_permissions(manage_channels=True)
-    async def pb_teardown(self, ctx: commands.Context) -> None:
-        await ctx.invoke(self.teardown)
-
-    @pb.command(name="anon")
-    @commands.guild_only()
-    @commands.has_permissions(manage_channels=True)
-    async def pb_anon(self, ctx: commands.Context) -> None:
-        pb_cog = self.bot.get_cog("Phonebooth")
-        if pb_cog:
-            await ctx.invoke(pb_cog.anon)
-
-    @pb.command(name="stats")
-    async def pb_stats(self, ctx: commands.Context) -> None:
-        await ctx.invoke(self.stats)
-
     # ── Error handler ─────────────────────────────────────────────────────────
 
     async def cog_command_error(self, ctx: commands.Context, error) -> None:

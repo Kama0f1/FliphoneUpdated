@@ -8,6 +8,7 @@ import discord
 from discord.ext import commands
 
 import config
+from access_control import is_trusted_moderator, owner_only, trusted_moderator_only
 
 
 class GuildAudit(commands.Cog, name="GuildAudit"):
@@ -15,10 +16,10 @@ class GuildAudit(commands.Cog, name="GuildAudit"):
         self.bot = bot
 
     async def _is_global_mod(self, ctx: commands.Context) -> bool:
-        return await self.bot.is_owner(ctx.author) or ctx.author.id in config.TRUSTED_MOD_IDS
+        return await is_trusted_moderator(self.bot, ctx.author)
 
-    @commands.command(name="servers", aliases=["serverlist"], hidden=True)
-    @commands.is_owner()
+    @commands.hybrid_command(name="servers", aliases=["serverlist"], hidden=True)
+    @owner_only()
     async def servers(self, ctx: commands.Context) -> None:
         """List all servers the bot is currently in (owner only)."""
         guilds = sorted(
@@ -50,8 +51,8 @@ class GuildAudit(commands.Cog, name="GuildAudit"):
             file=discord.File(data, filename="server_audit.txt"),
         )
 
-    @commands.command(name="leaveserver", hidden=True)
-    @commands.is_owner()
+    @commands.hybrid_command(name="leaveserver", hidden=True)
+    @owner_only()
     async def leaveserver(self, ctx: commands.Context, server_id: int) -> None:
         """Force the bot to leave a server by ID (owner only)."""
         guild = self.bot.get_guild(server_id)
@@ -68,7 +69,8 @@ class GuildAudit(commands.Cog, name="GuildAudit"):
 
         await ctx.send(f"Left server: {guild_name} ({server_id})")
 
-    @commands.command(name="serverban", aliases=["banguild"], hidden=True)
+    @commands.hybrid_command(name="serverban", aliases=["banguild"], hidden=True)
+    @trusted_moderator_only()
     async def serverban(
         self, ctx: commands.Context, server_id: int, *, reason: str = "No reason given"
     ) -> None:
@@ -87,7 +89,8 @@ class GuildAudit(commands.Cog, name="GuildAudit"):
                 await guild.leave()
         await ctx.send(f"🔨 **{name}** (`{server_id}`) is banned from Fliphone.\nReason: {reason}")
 
-    @commands.command(name="serverunban", aliases=["unbanguild"], hidden=True)
+    @commands.hybrid_command(name="serverunban", aliases=["unbanguild"], hidden=True)
+    @trusted_moderator_only()
     async def serverunban(self, ctx: commands.Context, server_id: int) -> None:
         """Remove a global Fliphone server ban."""
         if not await self._is_global_mod(ctx):

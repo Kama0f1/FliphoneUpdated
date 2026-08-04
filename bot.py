@@ -419,6 +419,15 @@ class PhoneboothBot(commands.AutoShardedBot):
                 )
             )
             return
+        if isinstance(error, commands.CheckFailure):
+            await ctx.send(
+                embed=discord.Embed(
+                    description="❌ This command is restricted to authorized Fliphone staff.",
+                    color=config.COLOR_ERR,
+                ),
+                ephemeral=ctx.interaction is not None,
+            )
+            return
         raise error
 
     # ── Command / Interaction logging ────────────────────────────────────

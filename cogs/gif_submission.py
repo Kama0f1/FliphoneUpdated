@@ -13,6 +13,7 @@ import discord
 from discord.ext import commands
 
 import config
+from access_control import is_trusted_moderator, trusted_moderator_only
 from relay_policy import (
     CustomEmojiCandidate,
     custom_emoji_asset_url,
@@ -39,7 +40,7 @@ def _safe_app_emoji_name(name: str, original_emoji_id: int) -> str:
 
 
 async def _is_submission_mod(bot: commands.Bot, user: discord.abc.User) -> bool:
-    return user.id in config.TRUSTED_MOD_IDS or await bot.is_owner(user)
+    return await is_trusted_moderator(bot, user)
 
 
 def _truthy_flag(value: object) -> bool:
@@ -573,8 +574,9 @@ class GifSubmission(commands.Cog):
         """Submit up to 5 custom server emojis in one command for review."""
         await self._handle_emoji_submission(ctx, emojis)
 
-    @commands.command(name="emojicleanup")
+    @commands.hybrid_command(name="emojicleanup")
     @commands.guild_only()
+    @trusted_moderator_only()
     async def emojicleanup(self, ctx: commands.Context, days: int = 90, limit: int = 25) -> None:
         """[Trusted mods] Delete unused or stale mirrored application emojis."""
         if not await _is_submission_mod(self.bot, ctx.author):
