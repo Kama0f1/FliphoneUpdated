@@ -11,65 +11,66 @@ import config
 
 
 CALL_COMMANDS = [
-    ("call", "f.call", "Join the 1:1 queue."),
-    ("hangup", "f.hangup", "End this channel's call or leave its queue."),
-    ("skip", "f.skip", "End this channel's call and search again."),
-    ("status", "f.status", "Show this channel's call state."),
-    ("block", "f.block", "Block the connected server and end the call."),
-    ("friendrequest", "f.fr", "Share your Discord username in the conversation."),
-    ("anon", "f.anon", "Toggle your tarot anon identity."),
-    ("notify", "f.notify", "Toggle queue notification DMs."),
-    ("addgif", "f.addgif", "Submit a GIF for safe relay approval. Burst limits still apply."),
-    ("addemoji", "f.addemoji", "Submit one message with up to 5 custom server emojis for review."),
-    ("report", "f.report", "Report the active or most recent conversation."),
-    ("profile", "f.profile", "Show your level, XP, ranks, and banner."),
-    ("banner", "f.banner", "Reroll your profile banner."),
-    ("leaderboard", "f.lb", "Show the global user XP leaderboard."),
-    ("serverlb", "f.serverlb", "Show the global server XP leaderboard."),
-    ("vote", "f.vote or /vote", "Open Fliphone's top.gg page."),
+    ("call", "/call", "Join the 1:1 queue."),
+    ("hangup", "/hangup", "End this channel's call or leave its queue."),
+    ("skip", "/skip", "End this channel's call and search again."),
+    ("status", "/status", "Show this channel's call state."),
+    ("block", "/block", "Block the connected server and end the call."),
+    ("friendrequest", "/friendrequest", "Share your Discord username in the conversation."),
+    ("anon", "/anon", "Toggle your tarot anon identity."),
+    ("privacy", "/privacy", "View, enable, or disable message relay for your account."),
+    ("notify", "/notify", "Toggle queue notification DMs."),
+    ("addgif", "/addgif", "Submit a GIF URL for safe relay approval."),
+    ("addemoji", "/addemoji", "Submit up to 5 custom server emojis in one command."),
+    ("report", "/report", "Report the active or most recent conversation."),
+    ("profile", "/profile", "Show your level, XP, ranks, and banner."),
+    ("banner", "/banner", "Reroll your profile banner."),
+    ("leaderboard", "/leaderboard", "Show the global user XP leaderboard."),
+    ("serverlb", "/serverlb", "Show the global server XP leaderboard."),
+    ("vote", "/vote", "Open Fliphone's top.gg page."),
 ]
 
 ROOM_COMMANDS = [
-    ("room", "f.room", "Join an available room of up to 5 servers."),
-    ("roomcreate", "f.roomcreate", "Create a fresh room."),
-    ("roomleave", "f.roomleave", "Leave this channel's room."),
-    ("roomskip", "f.roomskip", "Leave and find a different room."),
-    ("roomstatus", "f.roomstatus", "Show stations and room state."),
-    ("roomkick", "f.roomkick <station>", "Start a station vote-kick."),
-    ("friendrequest", "f.fr [station]", "Share with everyone or one station."),
-    ("block", "f.block <station>", "Block a station and leave the room."),
-    ("report", "f.report <station>", "Report one station."),
+    ("room", "/room", "Join an available room of up to 5 servers."),
+    ("roomcreate", "/roomcreate", "Create a fresh room."),
+    ("roomleave", "/roomleave", "Leave this channel's room."),
+    ("roomskip", "/roomskip", "Leave and find a different room."),
+    ("roomstatus", "/roomstatus", "Show stations and room state."),
+    ("roomkick", "/roomkick", "Start a station vote-kick."),
+    ("friendrequest", "/friendrequest", "Share with everyone or one station."),
+    ("block", "/block", "Block a station and leave the room."),
+    ("report", "/report", "Report one station."),
 ]
 
 ADMIN_COMMANDS = [
-    ("setup", "f.setup [#channel]", "Reset and configure Fliphone in one step."),
-    ("check", "f.check", "Diagnose permissions, webhook, and current state."),
-    ("repair", "f.repair [#channel]", "Rebuild a damaged setup."),
-    ("teardown", "f.teardown", "Remove setup after confirmation."),
-    ("blocklist", "f.blocklist", "List servers blocked by this server."),
-    ("unblock", "f.unblock <server_id>", "Remove a server block."),
-    ("kick", "f.kick", "End the call in the channel where it is run."),
+    ("setup", "/setup", "Reset and configure Fliphone in one step."),
+    ("check", "/check", "Diagnose permissions, webhook, and current state."),
+    ("repair", "/repair", "Rebuild a damaged setup."),
+    ("teardown", "@Fliphone teardown", "Remove setup after confirmation."),
+    ("blocklist", "/blocklist", "List servers blocked by this server."),
+    ("unblock", "/unblock", "Remove a server block."),
+    ("kick", "/kick", "End the call in the channel where it is run."),
 ]
 
 SUDO_COMMANDS = [
-    ("sudohelp", "f.sudohelp", "Show restricted tools."),
-    ("dbstatus", "f.dbstatus", "Check safe database health and row counts."),
-    ("ban", "f.ban <user_id> [reason]", "Apply a bot-wide user ban."),
-    ("unban", "f.unban <user_id>", "Remove a bot-wide user ban."),
-    ("serverban", "f.serverban <server_id> [reason]", "Ban a server and remove Fliphone from it."),
-    ("serverunban", "f.serverunban <server_id>", "Remove a bot-wide server ban."),
-    ("notifyignore", "f.notifyignore <user_id>", "Exclude a tester from queue broadcasts."),
-    ("servers", "f.servers", "List servers containing the bot."),
-    ("leaveserver", "f.leaveserver <server_id>", "Force the bot to leave a server."),
-    ("censor", "f.censor <word>", "Toggle a custom censored word."),
-    ("censorlist", "f.censorlist", "List custom censored words."),
-    ("gifreports", "f.gifreports", "Review reported GIFs."),
-    ("gifbl", "f.gifbl <id or url>", "Blacklist a GIF report or URL."),
-    ("gifwl", "f.gifwl <id or url>", "Whitelist a GIF report or URL."),
-    ("gifcheck", "f.gifcheck <url>", "Check GIF whitelist/blacklist status."),
-    ("emojicleanup", "f.emojicleanup [days] [limit]", "Delete unused or stale mirrored app emojis."),
-    ("userreports", "f.userreports", "Review conversation reports."),
-    ("resolvereport", "f.resolvereport <id>", "Resolve a conversation report."),
+    ("sudohelp", "@Fliphone sudohelp", "Show restricted tools."),
+    ("dbstatus", "@Fliphone dbstatus", "Check safe database health and row counts."),
+    ("ban", "@Fliphone ban <user_id> [reason]", "Apply a bot-wide user ban."),
+    ("unban", "@Fliphone unban <user_id>", "Remove a bot-wide user ban."),
+    ("serverban", "@Fliphone serverban <server_id> [reason]", "Ban a server and remove Fliphone from it."),
+    ("serverunban", "@Fliphone serverunban <server_id>", "Remove a bot-wide server ban."),
+    ("notifyignore", "@Fliphone notifyignore <user_id>", "Exclude a tester from queue broadcasts."),
+    ("servers", "@Fliphone servers", "List servers containing the bot."),
+    ("leaveserver", "@Fliphone leaveserver <server_id>", "Force the bot to leave a server."),
+    ("censor", "@Fliphone censor <word>", "Toggle a custom censored word."),
+    ("censorlist", "@Fliphone censorlist", "List custom censored words."),
+    ("gifreports", "@Fliphone gifreports", "Review reported GIFs."),
+    ("gifbl", "@Fliphone gifbl <id or url>", "Blacklist a GIF report or URL."),
+    ("gifwl", "@Fliphone gifwl <id or url>", "Whitelist a GIF report or URL."),
+    ("gifcheck", "@Fliphone gifcheck <url>", "Check GIF whitelist/blacklist status."),
+    ("emojicleanup", "@Fliphone emojicleanup [days] [limit]", "Delete unused or stale mirrored app emojis."),
+    ("userreports", "@Fliphone userreports", "Review conversation reports."),
+    ("resolvereport", "@Fliphone resolvereport <id>", "Resolve a conversation report."),
 ]
 
 PUBLIC_ALIASES = {
@@ -153,7 +154,7 @@ def _page_embed(page: int) -> discord.Embed:
             color=config.COLOR_WAIT,
         )
         _add_command_fields(embed, "Commands", ADMIN_COMMANDS)
-    embed.set_footer(text="Use f.help <command> for details. Restricted tools: f.sudohelp")
+    embed.set_footer(text="Use /help for details. Restricted tools use @Fliphone commands.")
     return embed
 
 
@@ -196,10 +197,10 @@ class Help(commands.Cog):
     async def _can_use_sudohelp(self, ctx: commands.Context) -> bool:
         return await self.bot.is_owner(ctx.author) or ctx.author.id in config.TRUSTED_MOD_IDS
 
-    @commands.command(name="help", aliases=["commands", "cmds"])
+    @commands.hybrid_command(name="help", aliases=["commands", "cmds"])
     async def help(self, ctx: commands.Context, *, command: Optional[str] = None) -> None:
         if command:
-            key = command.strip().lower().removeprefix(config.PREFIX.lower())
+            key = command.strip().lower().removeprefix("/")
             key = PUBLIC_ALIASES.get(key, key)
             entry = ALL_PUBLIC.get(key)
             if not entry:
@@ -217,7 +218,7 @@ class Help(commands.Cog):
             await ctx.send("You do not have permission to view restricted commands.")
             return
         if command:
-            key = command.strip().lower().removeprefix(config.PREFIX.lower())
+            key = command.strip().lower().removeprefix("@fliphone ")
             key = SUDO_ALIASES.get(key, key)
             entry = ALL_SUDO.get(key)
             if not entry:

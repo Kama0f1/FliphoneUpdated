@@ -41,9 +41,12 @@ def shutdown_announcement_embed() -> discord.Embed:
 class ShutdownNotice(commands.Cog):
     """Updates Fliphone's profile and sends one notice per configured server."""
 
-    APPLICATION_DESCRIPTION = (
+    SHUTDOWN_APPLICATION_DESCRIPTION = (
         "Fliphone is scheduled to shut down on "
         f"{shutdown_date_label()}. Thank you to everyone who used the bot."
+    )
+    ACTIVE_APPLICATION_DESCRIPTION = (
+        "Anonymous cross-server conversations through 1:1 calls and group rooms."
     )
 
     def __init__(self, bot) -> None:
@@ -58,15 +61,20 @@ class ShutdownNotice(commands.Cog):
     async def _update_application_description(self) -> None:
         if self._application_description_updated:
             return
+        description = (
+            self.SHUTDOWN_APPLICATION_DESCRIPTION
+            if config.SHUTDOWN_NOTICE_ENABLED
+            else self.ACTIVE_APPLICATION_DESCRIPTION
+        )
         try:
             application = await self.bot.application_info()
-            if application.description != self.APPLICATION_DESCRIPTION:
+            if application.description != description:
                 await self.bot.http.edit_application_info(
-                    reason="Fliphone service shutdown notice",
-                    payload={"description": self.APPLICATION_DESCRIPTION},
+                    reason="Update Fliphone application description",
+                    payload={"description": description},
                 )
             self._application_description_updated = True
-            logger.info("Shutdown date applied to Fliphone application description")
+            logger.info("Fliphone application description updated")
         except discord.HTTPException as exc:
             logger.warning("Could not update Fliphone application description: %s", exc)
 
@@ -142,9 +150,9 @@ class ShutdownNotice(commands.Cog):
 
     @tasks.loop(minutes=10)
     async def _shutdown_notice_loop(self) -> None:
+        await self._update_application_description()
         if not config.SHUTDOWN_NOTICE_ENABLED:
             return
-        await self._update_application_description()
         try:
             sent_count = await self._broadcast_pending_announcements()
         except Exception:

@@ -28,7 +28,7 @@ def _vote_embed(bot_id: int) -> discord.Embed:
         ),
         color=0xFF3366,
     )
-    embed.set_footer(text="Fliphone • You're receiving this because you have f.notify enabled.")
+    embed.set_footer(text="Fliphone • You're receiving this because you have /notify enabled.")
     return embed
 
 

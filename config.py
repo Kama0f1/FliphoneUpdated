@@ -19,9 +19,6 @@ def _parse_int_set(raw: str) -> set[int]:
 
 # ── Bot ───────────────────────────────────────────────────────────────────────
 TOKEN: str          = os.getenv("DISCORD_TOKEN", "")
-PREFIX: str         = os.getenv("COMMAND_PREFIX", "f.")
-# Both lowercase and uppercase prefix work (f.call and F.call)
-PREFIXES: list[str] = [PREFIX, PREFIX[0].upper() + PREFIX[1:]]
 DB_PATH: str        = os.getenv("DB_PATH", "phonebooth.db")
 DATABASE_URL: str   = os.getenv("DATABASE_URL", "")
 DATABASE_POOL_SIZE: int = int(os.getenv("DATABASE_POOL_SIZE", "5"))
@@ -30,7 +27,7 @@ PG_STATEMENT_CACHE_SIZE: int = int(os.getenv("PG_STATEMENT_CACHE_SIZE", "0"))
 
 # Planned service shutdown. The notice cog sends one announcement per configured
 # server channel and records delivery so restarts cannot repeat it.
-SHUTDOWN_NOTICE_ENABLED: bool = os.getenv("SHUTDOWN_NOTICE_ENABLED", "1").strip().lower() not in {
+SHUTDOWN_NOTICE_ENABLED: bool = os.getenv("SHUTDOWN_NOTICE_ENABLED", "0").strip().lower() not in {
     "0",
     "false",
     "no",

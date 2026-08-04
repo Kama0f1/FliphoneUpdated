@@ -232,9 +232,10 @@ CREATE TABLE IF NOT EXISTS gif_mode_settings (
 );
 
 CREATE TABLE IF NOT EXISTS user_preferences (
-    user_id    INTEGER PRIMARY KEY,
-    anonymous  INTEGER NOT NULL DEFAULT 0,
-    updated_at TEXT NOT NULL
+    user_id         INTEGER PRIMARY KEY,
+    anonymous       INTEGER NOT NULL DEFAULT 0,
+    content_opt_out INTEGER NOT NULL DEFAULT 0,
+    updated_at      TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS gif_submissions (
@@ -497,9 +498,10 @@ CREATE TABLE IF NOT EXISTS gif_mode_settings (
 );
 
 CREATE TABLE IF NOT EXISTS user_preferences (
-    user_id    BIGINT PRIMARY KEY,
-    anonymous  INTEGER NOT NULL DEFAULT 0,
-    updated_at TEXT NOT NULL
+    user_id         BIGINT PRIMARY KEY,
+    anonymous       INTEGER NOT NULL DEFAULT 0,
+    content_opt_out INTEGER NOT NULL DEFAULT 0,
+    updated_at      TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS gif_submissions (
@@ -751,6 +753,7 @@ class Database:
             ("call_reports", "review_msg_id", "BIGINT" if self.backend == "postgres" else "INTEGER"),
             ("call_reports", "review_channel_id", "BIGINT" if self.backend == "postgres" else "INTEGER"),
             ("emoji_submissions", "app_emoji_animated", "INTEGER NOT NULL DEFAULT 0"),
+            ("user_preferences", "content_opt_out", "INTEGER NOT NULL DEFAULT 0"),
         )
         for table, column, sql_type in optional_columns:
             if not await self._has_column(table, column):
@@ -928,6 +931,27 @@ class Database:
         return bool(
             await self._fetchval(
                 "SELECT anonymous FROM user_preferences WHERE user_id = ?", (user_id,)
+            )
+            or 0
+        )
+
+    async def set_content_opt_out(self, user_id: int, opted_out: bool) -> None:
+        await self._execute(
+            """
+            INSERT INTO user_preferences (user_id, anonymous, content_opt_out, updated_at)
+            VALUES (?, 0, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                content_opt_out = excluded.content_opt_out,
+                updated_at = excluded.updated_at
+            """,
+            (user_id, int(opted_out), datetime.utcnow().isoformat()),
+        )
+
+    async def is_content_opted_out(self, user_id: int) -> bool:
+        return bool(
+            await self._fetchval(
+                "SELECT content_opt_out FROM user_preferences WHERE user_id = ?",
+                (user_id,),
             )
             or 0
         )
@@ -2335,9 +2359,26 @@ class Database:
             "SELECT * FROM call_reports WHERE status = 'open' ORDER BY created_at ASC"
         )
 
+    async def get_expired_call_reports(self, cutoff: str):
+        return await self._fetchall(
+            """
+            SELECT * FROM call_reports
+            WHERE status = 'open' AND created_at < ?
+            ORDER BY created_at ASC
+            """,
+            (cutoff,),
+        )
+
     async def resolve_call_report(self, report_id):
         rowcount = await self._execute(
             "UPDATE call_reports SET status = 'resolved' WHERE id = ? AND status = 'open'",
+            (report_id,),
+        )
+        return rowcount > 0
+
+    async def expire_call_report(self, report_id: int) -> bool:
+        rowcount = await self._execute(
+            "UPDATE call_reports SET status = 'expired' WHERE id = ? AND status = 'open'",
             (report_id,),
         )
         return rowcount > 0

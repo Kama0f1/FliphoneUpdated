@@ -3,46 +3,41 @@ cogs/report.py - General call/conversation report system for Fliphone.
 
 Commands
 --------
-f.report / /report          - Report your most recent or active call
-f.userreports               - List open call reports [owner + trusted mods]
-f.resolvereport <id>        - Mark a report as resolved [owner + trusted mods]
+/report                     - Report your most recent or active call
+@Fliphone userreports       - List open call reports [owner + trusted mods]
+@Fliphone resolvereport     - Mark a report as resolved [owner + trusted mods]
 
 How it works
 ------------
-During relay, the bot maintains an in-memory rolling log of the last 50 messages
-per call, including a content excerpt used only when a report is submitted.
-This works for both 1-on-1 calls and group rooms.
-
 When a report is submitted:
   1. The reporter provides a reason and optionally attaches media.
   2. The bot looks up who they were connected to via active connection,
      the Phonebooth cog's last_calls cache, or call_history in the DB.
-  3. A log embed is sent to the report channel showing the reported server,
-     the reason, any media, and all recent senders captured from the message log.
+  3. Recent context is fetched on demand from the reporting Discord channel.
+  4. The context is sent to the private report channel and discarded locally.
 """
 
 from __future__ import annotations
 
 import asyncio
-import collections
 import io
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 import config
 from database import Database
+from relay_policy import is_local_only
 
 # Channel to send report log embeds to
 REPORT_LOG_CHANNEL_ID = int(os.getenv("USER_REPORT_LOG_CHANNEL_ID", 1497205915089371186))
 
-# How many recent messages to keep in the rolling log per call
-MAX_LOG_ENTRIES = 50
-MAX_LOG_CONTENT_CHARS = 2_000
-POST_CONVERSATION_RETENTION_SECONDS = 7 * 24 * 60 * 60
+MAX_CONTEXT_MESSAGES = 50
+MAX_CONTEXT_SCAN = 100
+REPORT_EVIDENCE_RETENTION_DAYS = 30
 
 
 # ── Report Modal (slash command) ──────────────────────────────────────────────
@@ -202,7 +197,6 @@ class UserReportPanelView(discord.ui.View):
             return
         if report:
             await self.cog._delete_call_report_review_message(report)
-        self.cog._report_session_ids.pop(self.selected_report_id, None)
         await self._refresh(interaction, f"Call report #{self.selected_report_id} resolved.")
 
     @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary)
@@ -215,14 +209,11 @@ class Report(commands.Cog):
         self.bot = bot
         self.db: Database = bot.db
 
-        # conn_id -> deque of { user_id, username, guild_id, guild_name, timestamp }
-        self._message_log: dict[int, collections.deque] = {}
+    async def cog_load(self) -> None:
+        self._cleanup_expired_reports.start()
 
-        # conn_id -> snapshot retained for post-conversation reports
-        self._last_logs: dict[int, list] = {}
-
-        # report_id -> active/previous conversation log key (content remains in the log only)
-        self._report_session_ids: dict[int, int] = {}
+    def cog_unload(self) -> None:
+        self._cleanup_expired_reports.cancel()
 
     async def _delete_call_report_review_message(self, report: dict) -> None:
         message_id = report.get("review_msg_id")
@@ -237,48 +228,18 @@ class Report(commands.Cog):
         except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError):
             pass
 
-    # ── Called by Phonebooth cog during every relay ───────────────────────────
+    # ── Private review evidence retention ─────────────────────────────────────
 
-    def record_message(
-        self,
-        conn_id:      int,
-        user_id:      int,
-        username:     str,
-        guild_id:     int,
-        guild_name:   str,
-        content:      str = "",
-    ) -> None:
-        """
-        Store a sender snapshot in the rolling log for this connection.
-        Call this from Phonebooth._relay() right before sending the webhook.
-        """
-        if conn_id not in self._message_log:
-            self._message_log[conn_id] = collections.deque(maxlen=MAX_LOG_ENTRIES)
-        self._message_log[conn_id].append({
-            "user_id":      user_id,
-            "username":     username,
-            "guild_id":     guild_id,
-            "guild_name":   guild_name,
-            "timestamp":    datetime.utcnow().isoformat(timespec="seconds"),
-            "content":      content[:MAX_LOG_CONTENT_CHARS],
-        })
+    @tasks.loop(hours=6)
+    async def _cleanup_expired_reports(self) -> None:
+        cutoff = (datetime.utcnow() - timedelta(days=REPORT_EVIDENCE_RETENTION_DAYS)).isoformat()
+        for report in await self.db.get_expired_call_reports(cutoff):
+            if await self.db.expire_call_report(int(report["id"])):
+                await self._delete_call_report_review_message(report)
 
-    def clear_log(self, conn_id: int) -> None:
-        """
-        Move the message log to last_logs when a call ends so post-hangup
-        reports can still access it. Call this alongside
-        _call_reported_gifs.pop(conn_id, None) in Phonebooth.
-        """
-        log = self._message_log.pop(conn_id, None)
-        if log:
-            self._last_logs[conn_id] = list(log)
-            loop = asyncio.get_running_loop()
-            loop.call_later(
-                POST_CONVERSATION_RETENTION_SECONDS,
-                self._last_logs.pop,
-                conn_id,
-                None,
-            )
+    @_cleanup_expired_reports.before_loop
+    async def _before_cleanup_expired_reports(self) -> None:
+        await self.bot.wait_until_ready()
 
     # ── Find the call to report against ──────────────────────────────────────
 
@@ -339,22 +300,114 @@ class Report(commands.Cog):
 
         return None
 
-    def _get_recent_senders(self, conn_id: Optional[int]) -> list[dict]:
-        """
-        Return deduplicated recent senders for a connection.
-        Checks active log first then the post-hangup snapshot.
-        """
-        if conn_id is None:
+    @staticmethod
+    def _parse_utc(value: Optional[str]) -> Optional[datetime]:
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    async def _fetch_report_context(
+        self,
+        channel_id: int,
+        call: dict,
+        reporting_guild_id: int,
+    ) -> list[dict]:
+        channel = self.bot.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(channel_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return []
+        if not hasattr(channel, "history"):
             return []
 
-        log = self._message_log.get(conn_id) or self._last_logs.get(conn_id, [])
-        if not log:
-            return []
+        started_at = self._parse_utc(call.get("started_at"))
+        ended_at = self._parse_utc(call.get("ended_at"))
+        history_kwargs: dict[str, object] = {
+            "limit": MAX_CONTEXT_SCAN,
+            "oldest_first": False,
+        }
+        if started_at:
+            history_kwargs["after"] = started_at - timedelta(seconds=1)
+        if ended_at:
+            history_kwargs["before"] = ended_at + timedelta(seconds=1)
 
+        try:
+            messages = [message async for message in channel.history(**history_kwargs)]
+        except (discord.Forbidden, discord.HTTPException, AttributeError):
+            return []
+        messages.reverse()
+
+        local_user_ids = {
+            int(message.author.id)
+            for message in messages
+            if message.webhook_id is None
+            and not message.author.bot
+            and (not self.bot.user or message.author.id != self.bot.user.id)
+        }
+        opted_out_results = await asyncio.gather(
+            *(self.db.is_content_opted_out(user_id) for user_id in local_user_ids),
+            return_exceptions=True,
+        )
+        opted_out_ids = {
+            user_id
+            for user_id, result in zip(local_user_ids, opted_out_results)
+            if result is True
+        }
+
+        entries: list[dict] = []
+        for message in messages:
+            is_webhook = message.webhook_id is not None
+            if not is_webhook and message.author.bot:
+                continue
+            if not is_webhook and int(message.author.id) in opted_out_ids:
+                continue
+
+            content = message.content or ""
+            if is_local_only(content):
+                continue
+            attachment_lines = [
+                f"[attachment: {attachment.filename}] {attachment.url}"
+                for attachment in message.attachments
+            ]
+            combined = "\n".join(part for part in (content.strip(), *attachment_lines) if part)
+            if not combined:
+                continue
+
+            entries.append(
+                {
+                    "user_id": None if is_webhook else int(message.author.id),
+                    "username": str(getattr(message.author, "display_name", message.author)),
+                    "guild_id": (
+                        int(call["other_guild_id"])
+                        if is_webhook
+                        else int(reporting_guild_id)
+                    ),
+                    "guild_name": "Relayed side" if is_webhook else "Reporting side",
+                    "timestamp": message.created_at.astimezone(timezone.utc).isoformat(
+                        timespec="seconds"
+                    ),
+                    "content": combined[:2_000],
+                }
+            )
+        return entries[-MAX_CONTEXT_MESSAGES:]
+
+    @staticmethod
+    def _get_recent_senders(entries: list[dict]) -> list[dict]:
+        """
+        Return the latest entry for each sender in fetched report context.
+        """
         # Deduplicate — keep latest entry per user
-        seen: dict[int, dict] = {}
-        for entry in log:
-            seen[entry["user_id"]] = entry
+        seen: dict[str, dict] = {}
+        for entry in entries:
+            key = str(entry.get("user_id") or entry.get("username") or "unknown")
+            seen[key] = entry
         return list(seen.values())
 
     @staticmethod
@@ -430,7 +483,7 @@ class Report(commands.Cog):
 
         call = await self._get_reportable_call(guild.id, channel_id, station)
         if call and call.get("needs_station"):
-            await interaction.followup.send("Specify who to report with `f.report <station>`.", ephemeral=True)
+            await interaction.followup.send("Choose the station using the `station` option in `/report`.", ephemeral=True)
             return
         if call and call.get("invalid_station"):
             await interaction.followup.send("That station is not in this room.", ephemeral=True)
@@ -448,7 +501,8 @@ class Report(commands.Cog):
             )
             return
 
-        senders = self._get_recent_senders(call.get("conn_id"))
+        raw_log = await self._fetch_report_context(channel_id, call, guild.id)
+        senders = self._get_recent_senders(raw_log)
 
         # Collect all media links
         media_links: list[str] = []
@@ -466,9 +520,6 @@ class Report(commands.Cog):
             call_started_at=call.get("started_at"),
             call_ended_at=call.get("ended_at"),
         )
-        if call.get("conn_id") is not None:
-            self._report_session_ids[int(report_id)] = int(call["conn_id"])
-
         # Confirm to reporter
         confirm_embed = discord.Embed(
             title="Report Submitted",
@@ -527,11 +578,12 @@ class Report(commands.Cog):
         # Recent senders — filter out the reporter's own guild
         other_senders = [s for s in senders if s["guild_id"] != guild.id]
         if other_senders:
-            sender_lines = [
-                f"- <@{s['user_id']}> **{self._safe_report_text(s['username'], 40)}** "
-                f"(`{s['user_id']}`)"
-                for s in other_senders[:10]
-            ]
+            sender_lines = []
+            for sender in other_senders[:10]:
+                label = f"- **{self._safe_report_text(sender['username'], 60)}**"
+                if sender.get("user_id"):
+                    label += f" (`{sender['user_id']}`)"
+                sender_lines.append(label)
             log_embed.add_field(
                 name=f"People Seen on Reported Side ({len(other_senders)})",
                 value="\n".join(sender_lines),
@@ -540,14 +592,10 @@ class Report(commands.Cog):
         else:
             log_embed.add_field(
                 name="Recent Senders",
-                value="No messages captured from the reported server yet." if call["active"]
-                      else "Message log unavailable — call ended before logging began or bot was restarted.",
+                value="No relayed messages were available in this channel for the selected call.",
                 inline=False,
             )
 
-        raw_log = self._message_log.get(call.get("conn_id")) or self._last_logs.get(
-            call.get("conn_id"), []
-        )
         transcript_file = None
         reported_excerpt = self._build_readable_excerpt(
             list(raw_log), call["other_guild_id"], only_reported=True
@@ -587,9 +635,9 @@ class Report(commands.Cog):
                     else "REPORTING"
                 )
                 content = " ".join(str(entry.get("content") or "").split())
+                sender_id = f" (user {entry['user_id']})" if entry.get("user_id") else ""
                 transcript_lines.append(
-                    f"[{entry['timestamp']} UTC] [{side}] {entry['username']} "
-                    f"(user {entry['user_id']}):\n  {content}"
+                    f"[{entry['timestamp']} UTC] [{side}] {entry['username']}{sender_id}:\n  {content}"
                 )
             transcript = f"{transcript_header}\n\n" + "\n\n".join(transcript_lines)
             transcript_file = discord.File(
@@ -610,7 +658,12 @@ class Report(commands.Cog):
             ):
                 log_embed.set_image(url=media_links[0])
 
-        log_embed.set_footer(text=f"Full context is attached | f.resolvereport {report_id} to close")
+        log_embed.set_footer(
+            text=(
+                f"Context was fetched only when this report was submitted | "
+                f"@Fliphone resolvereport {report_id} to close"
+            )
+        )
 
         try:
             review_message = await log_ch.send(embed=log_embed, file=transcript_file)
@@ -620,7 +673,7 @@ class Report(commands.Cog):
         except discord.HTTPException:
             pass
 
-    # ── f.report / /report ────────────────────────────────────────────────────
+    # ── /report ───────────────────────────────────────────────────────────────
 
     @commands.hybrid_command(name="report")
     @commands.guild_only()
@@ -642,72 +695,8 @@ class Report(commands.Cog):
             await ctx.interaction.response.send_modal(ReportModal(self, station))
             return
 
-        # Prefix — collect reason
-        await ctx.send(
-            embed=discord.Embed(
-                description=(
-                    "Please describe what happened. You have **60 seconds** to reply.\n"
-                    "Be as specific as possible — what was said, what rule was broken."
-                ),
-                color=config.COLOR_WAIT,
-            )
-        )
-
-        def check(m: discord.Message) -> bool:
-            return m.author == ctx.author and m.channel == ctx.channel
-
-        try:
-            reply = await self.bot.wait_for("message", check=check, timeout=60)
-        except asyncio.TimeoutError:
-            await ctx.send("⏱️ Report cancelled — no response within 60 seconds.")
-            return
-
-        reason = reply.content.strip()
-        if len(reason) < 10:
-            await ctx.send("❌ Please provide more detail (at least 10 characters).")
-            return
-
-        attachments = list(reply.attachments)
-        media_url: Optional[str] = None
-
-        # Ask for media if none attached
-        if not attachments:
-            await ctx.send(
-                embed=discord.Embed(
-                    description=(
-                        "Do you have any screenshots or video evidence? "
-                        "Send them now or type `skip` to submit without."
-                    ),
-                    color=config.COLOR_WAIT,
-                )
-            )
-            try:
-                media_reply = await self.bot.wait_for("message", check=check, timeout=120)
-                if media_reply.content.strip().lower() != "skip":
-                    if media_reply.attachments:
-                        attachments = list(media_reply.attachments)
-                    elif media_reply.content.strip().startswith("http"):
-                        media_url = media_reply.content.strip()
-            except asyncio.TimeoutError:
-                pass
-
-        class _Reply:
-            async def send(self_, content=None, embed=None, ephemeral=False):
-                await ctx.send(content=content, embed=embed)
-
-        class _FakeInteraction:
-            followup = _Reply()
-
-        await self._process_report(
-            interaction=_FakeInteraction(),
-            guild=ctx.guild,
-            channel_id=ctx.channel.id,
-            user=ctx.author,
-            reason=reason,
-            media_url=media_url,
-            attachments=attachments,
-            station=station,
-        )
+        await ctx.send("Use `/report` so Discord can collect the report reason privately.")
+        return
 
     # ── f.userreports ─────────────────────────────────────────────────────────
 
@@ -723,29 +712,6 @@ class Report(commands.Cog):
         embed = self._build_userreports_embed(reports)
         view = UserReportPanelView(self, reports) if reports else None
         await ctx.send(embed=embed, view=view)
-        return
-        if not reports:
-            await ctx.send("✅ No open call reports.")
-            return
-
-        lines = []
-        for r in reports[:20]:
-            reported_guild = self.bot.get_guild(r["reported_guild_id"])
-            reported_name  = reported_guild.name if reported_guild else f"Server {r['reported_guild_id']}"
-            short_reason   = r["reason"][:70] + "…" if len(r["reason"]) > 70 else r["reason"]
-            created        = r["created_at"][:10]
-            lines.append(
-                f"**#{r['id']}** — {created} — {reported_name}\n"
-                f"└ {short_reason}"
-            )
-
-        embed = discord.Embed(
-            title=f"Open Call Reports ({len(reports)})",
-            description="\n".join(lines),
-            color=config.COLOR_WARN,
-        )
-        embed.set_footer(text=f"f.resolvereport <id> to close  •  {config.FOOTER}")
-        await ctx.send(embed=embed)
 
     # ── f.resolvereport ───────────────────────────────────────────────────────
 
@@ -789,37 +755,13 @@ class Report(commands.Cog):
             ),
             inline=False,
         )
-        log = self._get_log_for_report(report)
-        reported_excerpt = self._build_readable_excerpt(
-            log, report["reported_guild_id"], only_reported=True, max_messages=6
-        )
-        context_excerpt = self._build_readable_excerpt(
-            log, report["reported_guild_id"], max_messages=6
-        )
-        if reported_excerpt:
-            embed.add_field(
-                name="Latest Messages from Reported Side",
-                value=reported_excerpt,
-                inline=False,
-            )
         embed.add_field(
-            name="Latest Two-Sided Context",
-            value=(
-                context_excerpt
-                or "Temporary context unavailable or expired. Check the original report message attachment."
-            ),
+            name="Evidence",
+            value="Open the original private report message to view its on-demand context attachment.",
             inline=False,
         )
         embed.set_footer(text="Use Resolve to close this report, or choose another report above.")
         return embed
-
-    def _get_log_for_report(self, report: dict) -> list[dict]:
-        report_id = int(report["id"])
-        session_id = self._report_session_ids.get(report_id)
-        if session_id is None:
-            return []
-        log = self._message_log.get(session_id) or self._last_logs.get(session_id, [])
-        return list(log)
 
     def _build_userreports_embed(self, reports: list[dict]) -> discord.Embed:
         if not reports:
@@ -848,7 +790,7 @@ class Report(commands.Cog):
             description="\n".join(lines),
             color=config.COLOR_WARN,
         )
-        embed.set_footer(text="Use the select menu/button, or f.resolvereport <id>.")
+        embed.set_footer(text="Use the select menu/button, or @Fliphone resolvereport <id>.")
         return embed
 
     @commands.command(name="resolvereport")
@@ -867,7 +809,6 @@ class Report(commands.Cog):
 
         if report:
             await self._delete_call_report_review_message(report)
-        self._report_session_ids.pop(report_id, None)
         await ctx.send(
             embed=discord.Embed(
                 description=f"✅ Report #{report_id} marked as resolved.",

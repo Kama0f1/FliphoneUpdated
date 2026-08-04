@@ -1,15 +1,7 @@
 """
 cogs/phonebooth.py – Core Phonebooth logic.
 
-Commands
---------
-f.call / f.c      – Join queue or connect instantly
-f.hangup / f.h    – End call or leave queue
-f.skip / f.s      – Hang up and immediately redial
-f.status          – Show current status
-f.block           – Block the server you're talking to
-f.anon            – Toggle your personal tarot identity
-f.fr              – Share your username as a friend request card
+Public commands use Discord slash commands such as /call, /hangup, and /skip.
 """
 
 from __future__ import annotations
@@ -347,10 +339,10 @@ _CONNECTED_MSG = (
     "📞 **Call answered! say hi!** 👋\n"
     "You are now in a call!\n"
     "Please remember to respect the user on the other end.\n"
-    "To skip a user, use `f.skip`  "
-    "To report a user, use `/report`. To block a user, use `f.block`.\n\n"
+    "To skip a user, use `/skip`. "
+    "To report a user, use `/report`. To block a user, use `/block`.\n\n"
     "*By continuing, you agree to be respectful. "
-    "To opt out, ask an admin to run `f.setup` in the channel to unconfigure it.*"
+    "Use `/privacy optout` at any time to stop Fliphone from processing your messages.*"
 )
 _ANON_NOTICE = (
     "🎭 **Anon mode is ON**"
@@ -385,7 +377,7 @@ class Phonebooth(commands.Cog):
         self._session: aiohttp.ClientSession | None = None
         self._wh_obj_cache: dict[str, discord.Webhook] = {}
         self._channel_webhook_urls: dict[int, str] = {}
-        self._user_policy_cache: dict[int, tuple[float, bool, bool]] = {}
+        self._user_policy_cache: dict[int, tuple[float, bool, bool, bool]] = {}
         self._ending_broken_connections: set[int] = set()
         self._reaction_routes: dict[tuple[int, int], tuple[int, int]] = {}
         self._reaction_times: dict[int, deque] = {}
@@ -488,7 +480,7 @@ class Phonebooth(commands.Cog):
                 try:
                     await channel.send(
                         f"📵 No one picked up after **{config.QUEUE_TIMEOUT} minutes**. "
-                        f"Use `f.call` to try again."
+                        f"Use `/call` to try again."
                     )
                 except discord.HTTPException:
                     pass
@@ -518,8 +510,8 @@ class Phonebooth(commands.Cog):
             try:
                 await channel.send(
                     f"<@{user_id}> still waiting? Fliphone is quiet right now.\n"
-                    "Run `f.notify` to opt into a DM whenever someone joins the queue, "
-                    "then you can use `f.hangup` and come back when there is activity."
+                    "Run `/notify` to opt into a DM whenever someone joins the queue, "
+                    "then you can use `/hangup` and come back when there is activity."
                 )
             except discord.HTTPException:
                 pass
@@ -579,9 +571,6 @@ class Phonebooth(commands.Cog):
                 "ended_at":       datetime.utcnow().isoformat(),
                 "active":         False,
             }
-        report_cog = self.bot.get_cog("Report")
-        if report_cog:
-            report_cog.clear_log(conn["id"])
         self._last_calls[conn["guild_a"]] = {
             "other_guild_id": conn["guild_b"],
             "started_at": conn["started_at"],
@@ -604,7 +593,7 @@ class Phonebooth(commands.Cog):
         self._clear_rl_state(channel_b)
         msg = (
             f"📵 Call ended after {self.INACTIVITY_MINUTES} minutes of inactivity.\n"
-            "Use `f.call` to start a new call."
+            "Use `/call` to start a new call."
         )
         for ch_id in (channel_a, channel_b):
             ch = self.bot.get_channel(ch_id)
@@ -679,7 +668,7 @@ class Phonebooth(commands.Cog):
                         try:
                             await channel.send(
                                 "📵 A conflicting duplicate call was cleared after restart. "
-                                "Use `f.call` to connect again."
+                                "Use `/call` to connect again."
                             )
                         except discord.HTTPException:
                             pass
@@ -955,17 +944,23 @@ class Phonebooth(commands.Cog):
         await self._remember_relay_webhook(channel, webhook_url)
         return webhook_url, []
 
-    async def _get_user_relay_policy(self, user_id: int) -> tuple[bool, bool]:
+    async def _get_user_relay_policy(self, user_id: int) -> tuple[bool, bool, bool]:
         now = time.monotonic()
         cached = self._user_policy_cache.get(user_id)
         if cached and cached[0] > now:
-            return cached[1], cached[2]
-        banned, anonymous = await asyncio.gather(
+            return cached[1], cached[2], cached[3]
+        banned, anonymous, content_opt_out = await asyncio.gather(
             self.db.is_user_banned(user_id),
             self.db.is_user_anonymous(user_id),
+            self.db.is_content_opted_out(user_id),
         )
-        self._user_policy_cache[user_id] = (now + 60, banned, anonymous)
-        return banned, anonymous
+        self._user_policy_cache[user_id] = (
+            now + 60,
+            banned,
+            anonymous,
+            content_opt_out,
+        )
+        return banned, anonymous, content_opt_out
 
     async def _connected_message_for(self, user_id: int) -> str:
         return _CONNECTED_MSG
@@ -975,8 +970,8 @@ class Phonebooth(commands.Cog):
         channel: discord.abc.Messageable,
         user_id: int,
     ) -> None:
-        _, anonymous = await self._get_user_relay_policy(user_id)
-        if not anonymous:
+        _, anonymous, content_opt_out = await self._get_user_relay_policy(user_id)
+        if not anonymous or content_opt_out:
             return
         try:
             await channel.send(f"<@{user_id}> {_ANON_NOTICE}")
@@ -1039,7 +1034,7 @@ class Phonebooth(commands.Cog):
                     await partner_channel.send(
                         "⚠️ Fliphone removed this server from the queue because webhook relay is unavailable.\n"
                         f"Missing or broken: **{', '.join(issues)}**\n"
-                        "A server admin should run `/check` or `f.check` in this channel."
+                        "A server admin should run `/check` in this channel."
                     )
                 except discord.HTTPException:
                     pass
@@ -1083,14 +1078,11 @@ class Phonebooth(commands.Cog):
             self._cancel_inactivity(conn_id)
             self._clear_rl_state(conn["channel_a"])
             self._clear_rl_state(conn["channel_b"])
-            report_cog = self.bot.get_cog("Report")
-            if report_cog:
-                report_cog.clear_log(conn_id)
 
             notice = (
                 "⚠️ **Call ended because webhook relay became unavailable.**\n"
                 "No messages were sent using the plain bot fallback. "
-                "Automatic repair failed. A server admin should run `f.repair` in this channel."
+                "Automatic repair failed. A server admin should run `/repair` in this channel."
             )
             for channel_id in (conn["channel_a"], conn["channel_b"]):
                 channel = self.bot.get_channel(channel_id)
@@ -1137,9 +1129,6 @@ class Phonebooth(commands.Cog):
         self._cancel_inactivity(conn_id)
         self._clear_rl_state(conn["channel_a"])
         self._clear_rl_state(conn["channel_b"])
-        report_cog = self.bot.get_cog("Report")
-        if report_cog:
-            report_cog.clear_log(conn_id)
 
         other_channel_id = (
             conn["channel_b"] if offender_channel_id == conn["channel_a"] else conn["channel_a"]
@@ -1158,7 +1147,7 @@ class Phonebooth(commands.Cog):
             try:
                 await other_channel.send(
                     "The other server hit the relay rate limit, so the call ended.\n"
-                    "Use `f.call` to start another call."
+                    "Use `/call` to start another call."
                 )
             except discord.HTTPException:
                 pass
@@ -1451,7 +1440,9 @@ class Phonebooth(commands.Cog):
         self._rl_warns.pop(message.channel.id, None)
 
         # ── Ban check + config fetch in parallel ──────────────────────────────
-        is_banned, anon = await self._get_user_relay_policy(message.author.id)
+        is_banned, anon, content_opt_out = await self._get_user_relay_policy(message.author.id)
+        if content_opt_out:
+            return
         if is_banned:
             try:
                 await message.channel.send(
@@ -1622,7 +1613,7 @@ class Phonebooth(commands.Cog):
         if inline_gif_urls and not safe_urls:
             try:
                 await message.channel.send(
-                    "That GIF source is not approved. Run `f.addgif`, then send it again within 60 seconds for review.",
+                    "That GIF source is not approved. Submit its URL with `/addgif` for review.",
                     delete_after=8,
                 )
             except discord.HTTPException:
@@ -1677,16 +1668,6 @@ class Phonebooth(commands.Cog):
         report_ch_id = int(config.REPORT_LOG_CHANNEL_ID) if config.REPORT_LOG_CHANNEL_ID else 0
 
         # ── Send via webhook ──────────────────────────────────────────────────
-        report_cog = self.bot.get_cog("Report")
-        if report_cog:
-            report_cog.record_message(
-                conn_id=conn["id"],
-                user_id=message.author.id,
-                username=str(message.author),
-                guild_id=message.guild.id,
-                guild_name=message.guild.name,
-                content=content.strip(),
-            )
         need_id = bool(reportable_gif_urls)
         target_channel = self.bot.get_channel(target_cid)
 
@@ -1774,16 +1755,16 @@ class Phonebooth(commands.Cog):
             return
         if not message.guild:
             return
-        gif_cog = self.bot.get_cog("GifSubmission")
-        if gif_cog and (gif_cog.is_consumed(message.id) or await gif_cog.consume_capture(message)):
+        conn = await self._get_connection_cached(message.channel.id)
+        if not conn:
+            return
+        _, _, content_opt_out = await self._get_user_relay_policy(message.author.id)
+        if content_opt_out:
             return
         if is_local_only(message.content or ""):
             return
         ctx = await self.bot.get_context(message)
         if ctx.valid:
-            return
-        conn = await self._get_connection_cached(message.channel.id)
-        if not conn:
             return
         target_channel_id = (
             int(conn["channel_b"])
@@ -1801,9 +1782,10 @@ class Phonebooth(commands.Cog):
     @commands.cooldown(1, 5, commands.BucketType.channel)
     async def call(self, ctx: commands.Context) -> None:
         """Dial into the queue, or connect instantly."""
-        is_banned, guild_banned, cfg, conn, room_member, q = await asyncio.gather(
+        is_banned, guild_banned, content_opt_out, cfg, conn, room_member, q = await asyncio.gather(
             self.db.is_user_banned(ctx.author.id),
             self.db.is_guild_banned(ctx.guild.id),
+            self.db.is_content_opted_out(ctx.author.id),
             self._get_guild_config_cached(ctx.guild.id),
             self._get_connection_cached(ctx.channel.id),
             self.db.get_room_member(ctx.channel.id),
@@ -1816,6 +1798,9 @@ class Phonebooth(commands.Cog):
         if guild_banned:
             await ctx.send("🚫 This server is banned from using Fliphone.")
             return
+        if content_opt_out:
+            await ctx.send("Message relay is disabled for your account. Use `/privacy optin` before calling.")
+            return
         cooldown_remaining = self._call_cooldown_remaining(ctx.channel.id)
         if cooldown_remaining:
             await ctx.send(
@@ -1825,20 +1810,20 @@ class Phonebooth(commands.Cog):
             return
 
         if not cfg:
-            await ctx.send("❌ Fliphone isn't set up. An admin should run `f.setup` once in this server.")
+            await ctx.send("❌ Fliphone isn't set up. An admin should run `/setup` once in this server.")
             return
 
         if conn:
-            await ctx.send(f"📞 Already in a call ({_duration_str(conn['started_at'])}). Use `f.hangup` to end it first.")
+            await ctx.send(f"📞 Already in a call ({_duration_str(conn['started_at'])}). Use `/hangup` to end it first.")
             return
 
         # Block joining a 1:1 call while the channel is in a group room
         if room_member:
-            await ctx.send("📡 This channel is currently in a group room. Use `f.roomleave` first.")
+            await ctx.send("📡 This channel is currently in a group room. Use `/roomleave` first.")
             return
 
         if q:
-            await ctx.send(f"⏳ Already waiting ({_duration_str(q['joined_at'])}). Use `f.hangup` to cancel.")
+            await ctx.send(f"⏳ Already waiting ({_duration_str(q['joined_at'])}). Use `/hangup` to cancel.")
             return
 
         wh_url, permission_issues = await self.ensure_relay_webhook(ctx.channel)
@@ -1846,7 +1831,7 @@ class Phonebooth(commands.Cog):
             await ctx.send(
                 "❌ Fliphone cannot start a call because webhook relay is unavailable.\n"
                 f"Missing or broken: **{', '.join(permission_issues)}**\n"
-                "A server admin should run `/check` or `f.check` in this channel."
+                "A server admin should run `/check` in this channel."
             )
             return
         claimed = await self._claim_valid_queue_match(
@@ -1895,7 +1880,7 @@ class Phonebooth(commands.Cog):
             await search_msg.edit(
                 content=(
                 f"📳 **Searching for someone to talk to...** ({queue_size} waiting, {active} active calls)\n"
-                f"Use `f.hangup` to cancel. Auto-cancels in {config.QUEUE_TIMEOUT} min."
+                f"Use `/hangup` to cancel. Auto-cancels in {config.QUEUE_TIMEOUT} min."
                 )
             )
             # Notify opted-in subscribers that someone is waiting
@@ -1912,21 +1897,18 @@ class Phonebooth(commands.Cog):
             await self.db.remove_from_queue(ctx.channel.id)
             self._cancel_timeout(ctx.channel.id)
             self._cancel_queue_nudge(ctx.channel.id)
-            await ctx.send("📵 Left the queue. Use `f.call` to dial again.")
+            await ctx.send("📵 Left the queue. Use `/call` to dial again.")
             return
 
         conn = await self._get_connection_cached(ctx.channel.id)
         if not conn:
-            await ctx.send("📵 Not in a call or queue. Use `f.call` to connect!")
+            await ctx.send("📵 Not in a call or queue. Use `/call` to connect!")
             return
 
         other_cid = conn["channel_b"] if ctx.channel.id == conn["channel_a"] else conn["channel_a"]
         duration  = _duration_str(conn["started_at"])
         msg_count = conn["msg_count"]
         conn_id = conn["id"]
-        report_cog = self.bot.get_cog("Report")
-        if report_cog:
-            report_cog.clear_log(conn["id"])
         self._last_calls[conn["guild_a"]] = {
             "other_guild_id": conn["guild_b"],
             "started_at": conn["started_at"],
@@ -1949,14 +1931,14 @@ class Phonebooth(commands.Cog):
         self._clear_rl_state(conn["channel_b"])
         await ctx.send(
             f"📵 Call ended. Duration: **{duration}** · Messages: **{msg_count}**\n"
-            "Use `f.call` to start a new call."
+            "Use `/call` to start a new call."
         )
         other = self.bot.get_channel(other_cid)
         if other:
             try:
                 await other.send(
                     "📵 The other server ended the call.\n"
-                    "Use `f.call` to start a new call."
+                    "Use `/call` to start a new call."
                 )
             except discord.HTTPException:
                 pass
@@ -1970,7 +1952,7 @@ class Phonebooth(commands.Cog):
         """End the current call and immediately search for a new one."""
         cfg = await self._get_guild_config_cached(ctx.guild.id)
         if not cfg:
-            await ctx.send("❌ Fliphone isn't set up. An admin should run `f.setup` once in this server.")
+            await ctx.send("❌ Fliphone isn't set up. An admin should run `/setup` once in this server.")
             return
         cooldown_remaining = self._call_cooldown_remaining(ctx.channel.id)
         if cooldown_remaining:
@@ -1984,9 +1966,6 @@ class Phonebooth(commands.Cog):
         if conn:
             other_cid = conn["channel_b"] if ctx.channel.id == conn["channel_a"] else conn["channel_a"]
             skip_conn_id = conn["id"]
-            report_cog = self.bot.get_cog("Report")
-            if report_cog:
-                report_cog.clear_log(conn["id"])
             self._last_calls[conn["guild_a"]] = {
                 "other_guild_id": conn["guild_b"],
                 "started_at": conn["started_at"],
@@ -2012,7 +1991,7 @@ class Phonebooth(commands.Cog):
                 try:
                     await other_ch.send(
                         "📵 The other user skipped.\n"
-                        "Use `f.call` to start a new call."
+                        "Use `/call` to start a new call."
                     )
                 except discord.HTTPException:
                     pass
@@ -2030,7 +2009,7 @@ class Phonebooth(commands.Cog):
             await ctx.send(
                 "❌ Fliphone cannot search for a new call because webhook relay is unavailable.\n"
                 f"Missing or broken: **{', '.join(permission_issues)}**\n"
-                "A server admin should run `/check` or `f.check` in this channel."
+                "A server admin should run `/check` in this channel."
             )
             return
         claimed = await self._claim_valid_queue_match(
@@ -2073,7 +2052,7 @@ class Phonebooth(commands.Cog):
             queue_size = await self.db.get_queue_size()
             await ctx.send(
                 f"📳 **Searching for someone to talk to...** ({queue_size} waiting)\n"
-                f"Use `f.skip` again to re-roll. Auto-cancels in {config.QUEUE_TIMEOUT} min."
+                f"Use `/skip` again to re-roll. Auto-cancels in {config.QUEUE_TIMEOUT} min."
             )
 
     # ── f.status ──────────────────────────────────────────────────────────────
@@ -2109,7 +2088,7 @@ class Phonebooth(commands.Cog):
             await ctx.send(embed=embed)
             return
 
-        embed = discord.Embed(title="📴 Idle", description="Not connected. Use `f.call` to connect!", color=config.COLOR_WAIT)
+        embed = discord.Embed(title="📴 Idle", description="Not connected. Use `/call` to connect!", color=config.COLOR_WAIT)
         active_calls, queue_size, total_calls = await asyncio.gather(
             self.db.get_active_connection_count(),
             self.db.get_queue_size(),
@@ -2134,7 +2113,7 @@ class Phonebooth(commands.Cog):
                 await ctx.send("❌ You can only block a server while in an active call or room.")
                 return
             if not station:
-                await ctx.send("Specify a station: `f.block <station>`.")
+                await ctx.send("Specify a station with the `station` option in `/block`.")
                 return
             members = await self.db.get_room_members(room_member["room_id"])
             wanted = station.strip().capitalize()
@@ -2162,9 +2141,6 @@ class Phonebooth(commands.Cog):
 
         await self.db.block_guild(ctx.guild.id, other_gid, ctx.author.id)
         block_conn_id = conn["id"]
-        report_cog = self.bot.get_cog("Report")
-        if report_cog:
-            report_cog.clear_log(conn["id"])
         self._last_calls[conn["guild_a"]] = {
             "other_guild_id": conn["guild_b"],
             "started_at": conn["started_at"],
@@ -2196,7 +2172,7 @@ class Phonebooth(commands.Cog):
 
     # ── f.notify ─────────────────────────────────────────────────────────────
 
-    @commands.command(name="notify", aliases=["notifications"])
+    @commands.hybrid_command(name="notify", aliases=["notifications"])
     async def notify(self, ctx: commands.Context) -> None:
         """Toggle queue call notifications. The bot DMs you when someone is waiting."""
         enabled = await self.db.toggle_notify(ctx.author.id)
@@ -2207,7 +2183,7 @@ class Phonebooth(commands.Cog):
                     description=(
                         "You'll now receive a DM whenever someone enters the queue "
                         "with no one to connect to.\n\n"
-                        "Run `f.notify` again to turn it off."
+                        "Run `/notify` again to turn it off."
                     ),
                     color=config.COLOR_OK,
                 )
@@ -2218,13 +2194,13 @@ class Phonebooth(commands.Cog):
                     title="🔕 Notifications Disabled",
                     description=(
                         "You will no longer receive queue notification DMs.\n\n"
-                        "Run `f.notify` to turn them back on."
+                        "Run `/notify` to turn them back on."
                     ),
                     color=config.COLOR_WARN,
                 )
             )
 
-    @commands.command(name="profile", aliases=["settings", "me"])
+    @commands.hybrid_command(name="profile", aliases=["settings", "me"])
     async def profile(self, ctx: commands.Context) -> None:
         """Show your Fliphone user settings and current server/channel state."""
         guild_id = ctx.guild.id if ctx.guild else None
@@ -2304,7 +2280,7 @@ class Phonebooth(commands.Cog):
             discord.ui.Section(
                 "\n".join(stat_lines)
                 + "\n"
-                "-# `f.banner` rerolls your banner",
+                "-# `/banner` rerolls your banner",
                 accessory=discord.ui.Thumbnail(_get_avatar_url(member), description=f"{display_name}'s avatar"),
             )
         )
@@ -2355,19 +2331,19 @@ class Phonebooth(commands.Cog):
         embed.set_footer(text="Server XP comes from relayed Fliphone chat activity.")
         return embed
 
-    @commands.command(name="leaderboard", aliases=["lb", "levels", "rankings"])
+    @commands.hybrid_command(name="leaderboard", aliases=["lb", "levels", "rankings"])
     async def leaderboard(self, ctx: commands.Context) -> None:
         """Show the global Fliphone chat XP leaderboard."""
         rows = await self.db.get_chat_leaderboard(limit=10)
         await ctx.send(embed=self._user_leaderboard_embed(rows, title="Fliphone User Leaderboard"))
 
-    @commands.command(name="serverlb", aliases=["slb", "serverleaderboard"])
+    @commands.hybrid_command(name="serverlb", aliases=["slb", "serverleaderboard"])
     async def serverlb(self, ctx: commands.Context) -> None:
         """Show the global Fliphone server XP leaderboard."""
         rows = await self.db.get_server_leaderboard(limit=10)
         await ctx.send(embed=self._server_leaderboard_embed(rows))
 
-    @commands.command(name="banner", aliases=["profilebanner"])
+    @commands.hybrid_command(name="banner", aliases=["profilebanner"])
     async def banner(self, ctx: commands.Context, action: Optional[str] = None) -> None:
         """Reroll or reset your Fliphone profile banner."""
         banners = _profile_banner_files()
@@ -2391,7 +2367,7 @@ class Phonebooth(commands.Cog):
             return
 
         if action:
-            await ctx.send("Use `f.banner` to reroll, or `f.banner reset` to return to your default.")
+            await ctx.send("Use `/banner` to reroll, or set `action` to `reset` for your default.")
             return
 
         current = await self.db.get_profile_banner(ctx.author.id)
@@ -2407,7 +2383,7 @@ class Phonebooth(commands.Cog):
             color=config.COLOR_OK,
         )
         banner_file = await self._attach_profile_banner(ctx.author.id, embed)
-        embed.set_footer(text="Run f.profile to see your full profile.")
+        embed.set_footer(text="Run /profile to see your full profile.")
         if banner_file:
             await ctx.send(embed=embed, file=banner_file)
         else:
@@ -2429,7 +2405,7 @@ class Phonebooth(commands.Cog):
                             title="📞 Someone is waiting for a call!",
                             description=(
                                 "A server just joined the Fliphone queue with nobody to connect to.\n\n"
-                                "Head to your phonebooth channel and run `f.call` to connect!"
+                                "Head to your phonebooth channel and run `/call` to connect!"
                             ),
                             color=config.COLOR_WAIT,
                         )
@@ -2449,7 +2425,7 @@ class Phonebooth(commands.Cog):
             self._get_guild_config_cached(ctx.guild.id),
         )
         if not cfg and not guild_cfg:
-            await ctx.send("❌ Fliphone isn't set up. An admin should run `f.setup` first.")
+            await ctx.send("❌ Fliphone isn't set up. An admin should run `/setup` first.")
             return
         is_anon = await self.db.toggle_user_anonymous(ctx.author.id)
         self._user_policy_cache.pop(ctx.author.id, None)
@@ -2457,6 +2433,49 @@ class Phonebooth(commands.Cog):
             await ctx.send("🎭 **Anon mode ON** — your relayed messages will use a stable tarot identity in each conversation.")
         else:
             await ctx.send("👤 **Anon mode OFF** — your relayed messages will show your filtered display name and avatar.")
+
+    @commands.hybrid_group(name="privacy", fallback="status")
+    async def privacy(self, ctx: commands.Context) -> None:
+        """Show whether Fliphone is allowed to relay your messages."""
+        opted_out = await self.db.is_content_opted_out(ctx.author.id)
+        if opted_out:
+            description = (
+                "**Message relay is disabled for you.** Fliphone ignores your messages before "
+                "reading their content. Use `/privacy optin` to participate again."
+            )
+            color = config.COLOR_WARN
+        else:
+            description = (
+                "**Message relay is enabled for you.** Fliphone only processes your messages in "
+                "a configured channel during an active call or room. Use `/privacy optout` to stop."
+            )
+            color = config.COLOR_OK
+        await ctx.send(
+            embed=discord.Embed(title="Fliphone Privacy", description=description, color=color),
+            ephemeral=ctx.interaction is not None,
+        )
+
+    @privacy.command(name="optout")
+    async def privacy_optout(self, ctx: commands.Context) -> None:
+        """Stop Fliphone from relaying or report-processing your messages."""
+        await self.db.set_content_opt_out(ctx.author.id, True)
+        self._user_policy_cache.pop(ctx.author.id, None)
+        await ctx.send(
+            "Privacy opt-out enabled. Your future messages will not be relayed or included in "
+            "new report context. Commands still work.",
+            ephemeral=ctx.interaction is not None,
+        )
+
+    @privacy.command(name="optin")
+    async def privacy_optin(self, ctx: commands.Context) -> None:
+        """Allow Fliphone to relay messages during active conversations."""
+        await self.db.set_content_opt_out(ctx.author.id, False)
+        self._user_policy_cache.pop(ctx.author.id, None)
+        await ctx.send(
+            "Privacy opt-in enabled. Messages you send during active Fliphone conversations may "
+            "be safety-checked and relayed.",
+            ephemeral=ctx.interaction is not None,
+        )
 
     # ── f.fr / f.friendrequest ────────────────────────────────────────────────
 

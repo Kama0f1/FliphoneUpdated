@@ -1,21 +1,8 @@
 """
 cogs/admin.py – Admin/setup/moderation commands for Phonebooth V2.
 
-f.setup          – Register current channel as phonebooth
-f.teardown       – Remove phonebooth from this server
-f.stats          – Global statistics
-f.invite         – Show bot invite link
-f.blocklist      – List blocked servers
-f.unblock <id>   – Unblock a server
-f.kick           – Force-disconnect the active call
-f.ban <user_id>  – Ban a user from using the bot (bot-wide)  [owner]
-f.unban <user_id>– Unban a user                              [owner]
-f.reports        – List pending GIF reports                  [owner + trusted mods]
-f.gifbl          – Blacklist a GIF URL or report             [owner + trusted mods]
-f.gifwl          – Whitelist a GIF URL or report             [owner + trusted mods]
-f.gifcheck <url> – Check if a URL is listed                  [owner + trusted mods]
-f.notifyignore   – Toggle a user off the notify fire list    [owner]
-f.pb             – Legacy command group (still works)
+Public setup commands use Discord slash commands. Restricted maintenance commands
+must mention Fliphone, for example: @Fliphone dbstatus.
 """
 
 from __future__ import annotations
@@ -308,7 +295,7 @@ class Admin(commands.Cog, name="Admin"):
                         "with **Manage Roles** to make that change."
                     )
 
-        return "\n\n".join(guidance) or "Run `f.repair` to rebuild the relay webhook."
+        return "\n\n".join(guidance) or "Run `/repair` to rebuild the relay webhook."
 
     async def _delete_fliphone_webhooks(self, channel: Optional[discord.TextChannel]) -> None:
         if not channel:
@@ -383,7 +370,7 @@ class Admin(commands.Cog, name="Admin"):
             description=(
                 "Fliphone did not reset anything because this server is currently using it:\n"
                 + "\n".join(f"- {item}" for item in activity)
-                + "\n\nEnd or leave that activity first, then run `f.repair` again."
+                + "\n\nEnd or leave that activity first, then run `/repair` again."
             ),
             color=config.COLOR_WARN,
         )
@@ -410,9 +397,6 @@ class Admin(commands.Cog, name="Admin"):
                 pb_cog._call_reported_gifs.pop(conn["id"], None)
                 pb_cog._clear_rl_state(conn["channel_a"])
                 pb_cog._clear_rl_state(conn["channel_b"])
-            report_cog = self.bot.get_cog("Report")
-            if report_cog:
-                report_cog.clear_log(conn["id"])
             if notify_partner:
                 other = self.bot.get_channel(other_id)
                 if other:
@@ -474,7 +458,7 @@ class Admin(commands.Cog, name="Admin"):
                 title="Fliphone Setup Check",
                 description=(
                     "This server is not set up yet.\n"
-                    "Run `f.setup` in the channel you want to use."
+                    "Run `/setup` in the channel you want to use."
                 ),
                 color=config.COLOR_WARN,
             )
@@ -524,17 +508,17 @@ class Admin(commands.Cog, name="Admin"):
                     if bot_webhook and stored_url == bot_webhook.url:
                         ok_lines.append("Relay webhook is present.")
                     elif bot_webhook:
-                        issues.append("The stored relay webhook is stale. Run `f.repair`.")
+                        issues.append("The stored relay webhook is stale. Run `/repair`.")
                     elif len(webhooks) >= 15:
                         issues.append(
                             "This channel has Discord's maximum of 15 webhooks. Delete one or use another channel."
                         )
                     else:
-                        issues.append("No Fliphone webhook found. Run `f.repair`.")
+                        issues.append("No Fliphone webhook found. Run `/repair`.")
                 except discord.Forbidden:
-                    issues.append("Cannot inspect webhooks. Check channel/category permissions, then run `f.repair`.")
+                    issues.append("Cannot inspect webhooks. Check channel/category permissions, then run `/repair`.")
                 except discord.HTTPException:
-                    issues.append("Discord failed while checking webhooks. Try `f.check` again.")
+                    issues.append("Discord failed while checking webhooks. Try `/check` again.")
 
                 if bot_webhook and probe_user:
                     pb_cog = self.bot.get_cog("Phonebooth")
@@ -579,14 +563,14 @@ class Admin(commands.Cog, name="Admin"):
                 value=(
                     self._permission_recovery_guidance(guild, probe_user, channel, missing)
                     if missing and probe_user
-                    else "Run `f.repair` to rebuild the damaged setup after active calls, searches, and rooms end."
+                    else "Run `/repair` to rebuild the damaged setup after active calls, searches, and rooms end."
                 ),
                 inline=False,
             )
         else:
             embed.add_field(
                 name="Next Step",
-                value="Setup looks healthy. Users can run `f.call` in any text channel with the required permissions.",
+                value="Setup looks healthy. Users can run `/call` in any text channel with the required permissions.",
                 inline=False,
             )
         embed.set_footer(text=config.FOOTER)
@@ -610,7 +594,7 @@ class Admin(commands.Cog, name="Admin"):
                 description=(
                     f"Fliphone is missing: **{', '.join(permission_issues)}**\n\n"
                     f"{self._permission_recovery_guidance(guild, user, target, permission_issues)}\n\n"
-                    "After permissions are fixed, run `f.setup` again in this channel."
+                    "After permissions are fixed, run `/setup` again in this channel."
                 ),
                 color=config.COLOR_ERR,
             )
@@ -622,7 +606,7 @@ class Admin(commands.Cog, name="Admin"):
                 title="Setup Could Not Finish",
                 description=(
                     f"Discord blocked webhook creation: **{', '.join(webhook_issues)}**\n\n"
-                    f"**[Re-invite Fliphone]({self._invite_url(guild.id)})**, then run `f.setup` again. "
+                    f"**[Re-invite Fliphone]({self._invite_url(guild.id)})**, then run `/setup` again. "
                     "If it still fails, allow Manage Webhooks for Fliphone in this channel/category or use another channel."
                 ),
                 color=config.COLOR_ERR,
@@ -643,7 +627,7 @@ class Admin(commands.Cog, name="Admin"):
         embed.add_field(name="Avatar Test", value="Passed" if avatar_ok else "Using safe fallback", inline=True)
         embed.add_field(
             name="Next Step",
-            value="Users can run `f.call` in any text channel where Fliphone can view, send messages, and manage webhooks.",
+            value="Users can run `/call` in any text channel where Fliphone can view, send messages, and manage webhooks.",
             inline=False,
         )
         embed.add_field(
@@ -691,8 +675,8 @@ class Admin(commands.Cog, name="Admin"):
                         description=(
                             f"This server already has a healthy setup in {channel_label}. "
                             "Nothing was reset.\n\n"
-                            "Users can run `f.call` in any text channel where Fliphone has the required permissions. "
-                            "Use `f.check` for diagnostics or `f.repair` only when setup is broken."
+                            "Users can run `/call` in any text channel where Fliphone has the required permissions. "
+                            "Use `/check` for diagnostics or `/repair` only when setup is broken."
                         ),
                         color=config.COLOR_OK,
                     )
@@ -710,8 +694,8 @@ class Admin(commands.Cog, name="Admin"):
                             "Fliphone found an existing setup and did not overwrite it.\n\n"
                             "**Problem:** " + "; ".join(issues)
                             + activity_note
-                            + "\n\nRun `f.repair` after active calls, queue searches, and rooms have ended. "
-                            "Use `f.repair #channel` if you need to move setup to a different channel."
+                            + "\n\nRun `/repair` after active calls, queue searches, and rooms have ended. "
+                            "Use the `channel` option if you need to move setup to a different channel."
                         ),
                         color=config.COLOR_WARN,
                     )
@@ -819,7 +803,7 @@ class Admin(commands.Cog, name="Admin"):
     @commands.guild_only()
     @commands.has_permissions(manage_channels=True)
     async def teardown(self, ctx: commands.Context) -> None:
-        """Completely remove Fliphone state so the next f.setup starts clean."""
+        """Completely remove Fliphone state so the next /setup starts clean."""
         await ctx.send("Type `confirm` within 20 seconds to remove all Fliphone setup for this server.")
         try:
             confirmation = await self.bot.wait_for(
@@ -844,11 +828,11 @@ class Admin(commands.Cog, name="Admin"):
                 return
 
             await self._clear_guild_setup_state(ctx.guild, notify_partner=True)
-            await ctx.send("📵 Fliphone was fully removed. Run `f.setup` in the channel you want to use.")
+            await ctx.send("📵 Fliphone was fully removed. Run `/setup` in the channel you want to use.")
 
     # ── f.stats ───────────────────────────────────────────────────────────────
 
-    @commands.command(name="stats")
+    @commands.hybrid_command(name="stats")
     async def stats(self, ctx: commands.Context) -> None:
         """Display global Fliphone statistics."""
         configured_guild_ids = set(await self.db.get_configured_guild_ids())
@@ -878,7 +862,7 @@ class Admin(commands.Cog, name="Admin"):
             description=(
                 f"**[➕ Click here to invite the bot]({url})**\n\n"
                 "Fliphone connects your server to a random server for an anonymous "
-                "cross-server chat. Run `f.setup` in any channel after inviting!"
+                "cross-server chat. Run `/setup` in any channel after inviting!"
             ),
             color=0x5865F2,
         )
@@ -899,8 +883,8 @@ class Admin(commands.Cog, name="Admin"):
             name="Getting Started",
             value=(
                 "1. Invite the bot\n"
-                "2. Run `f.setup` in your chosen channel\n"
-                "3. Type `f.call` to connect!"
+                "2. Run `/setup` in your chosen channel\n"
+                "3. Use `/call` to connect!"
             ),
             inline=False,
         )
@@ -946,7 +930,7 @@ class Admin(commands.Cog, name="Admin"):
 
     # ── f.blocklist ───────────────────────────────────────────────────────────
 
-    @commands.command(name="blocklist", aliases=["blocked"])
+    @commands.hybrid_command(name="blocklist", aliases=["blocked"])
     @commands.guild_only()
     @commands.has_permissions(manage_channels=True)
     async def blocklist(self, ctx: commands.Context) -> None:
@@ -963,12 +947,12 @@ class Admin(commands.Cog, name="Admin"):
             lines.append(f"• **{name}** — ID: `{entry['blocked_guild_id']}`")
 
         embed = discord.Embed(title="🚫 Blocked Servers", description="\n".join(lines), color=config.COLOR_ERR)
-        embed.set_footer(text=f"Use f.unblock <id> to unblock  •  {config.FOOTER}")
+        embed.set_footer(text=f"Use /unblock to unblock  •  {config.FOOTER}")
         await ctx.send(embed=embed)
 
     # ── f.unblock ─────────────────────────────────────────────────────────────
 
-    @commands.command(name="unblock")
+    @commands.hybrid_command(name="unblock")
     @commands.guild_only()
     @commands.has_permissions(manage_channels=True)
     async def unblock(self, ctx: commands.Context, server_id: int) -> None:
@@ -983,14 +967,14 @@ class Admin(commands.Cog, name="Admin"):
 
     # ── f.kick ────────────────────────────────────────────────────────────────
 
-    @commands.command(name="kick")
+    @commands.hybrid_command(name="kick")
     @commands.guild_only()
     @commands.has_permissions(manage_channels=True)
     async def kick(self, ctx: commands.Context) -> None:
         """Force-disconnect the active call."""
         guild_cfg = await self.db.get_guild_config(ctx.guild.id)
         if not guild_cfg:
-            await ctx.send("❌ Phonebooth isn't configured. Run `f.setup` first.")
+            await ctx.send("❌ Phonebooth isn't configured. Run `/setup` first.")
             return
 
         conn = await self.db.get_connection(ctx.channel.id)
@@ -1020,7 +1004,7 @@ class Admin(commands.Cog, name="Admin"):
         """
         [Bot owner + trusted mods] Add or remove a word from the censor list.
         If the word is already censored, it will be removed (toggle).
-        Usage: f.censor <word or phrase>
+        Usage: @Fliphone censor <word or phrase>
         """
         if not await self._is_global_mod(ctx.author, ctx.guild):
             await ctx.send("❌ Only the bot owner and trusted mods can use this command.")
@@ -1092,7 +1076,7 @@ class Admin(commands.Cog, name="Admin"):
         if guild:
             await ctx.send(
                 f"⚠️ `{user_id}` is the server ID for **{guild.name}**, not a user ID. "
-                f"Use `f.serverban {user_id} <reason>` to ban that server."
+                f"Use `@Fliphone serverban {user_id} <reason>` to ban that server."
             )
             return
         await self.db.ban_user(user_id, ctx.author.id, reason)
@@ -1188,7 +1172,7 @@ class Admin(commands.Cog, name="Admin"):
             color=config.COLOR_WARN,
         )
         embed.set_footer(
-            text="f.gifbl <id or url>  →  blacklist  |  f.gifwl <id or url>  →  whitelist"
+            text="@Fliphone gifbl <id or url> to blacklist | @Fliphone gifwl <id or url> to whitelist"
         )
         await ctx.send(embed=embed)
 
@@ -1224,7 +1208,7 @@ class Admin(commands.Cog, name="Admin"):
                 value=f"{len(pending) - 10} more pending. Use the select menu to inspect them.",
                 inline=False,
             )
-        embed.set_footer(text="Use the select menu/buttons, or f.gifbl <id/url> and f.gifwl <id/url>.")
+        embed.set_footer(text="Use the buttons, or mention Fliphone with gifbl/gifwl and an ID or URL.")
         return embed
 
     @commands.command(name="gifbl")
@@ -1313,19 +1297,19 @@ class Admin(commands.Cog, name="Admin"):
         else:
             await ctx.send(
                 f"❌ Pass a report ID (number) or a full URL starting with `http`.\n"
-                f"Example: `f.gif{action[:2]} 42` or `f.gif{action[:2]} https://tenor.com/view/...`"
+                f"Example: `@Fliphone gif{action[:2]} 42` or mention Fliphone with a full URL."
             )
             return None
     # ── f.pb (legacy group kept for backwards compat) ─────────────────────────
 
     @commands.group(name="pb", invoke_without_command=True, case_insensitive=True)
     async def pb(self, ctx: commands.Context) -> None:
-        """Phonebooth admin commands. Use f.setup, f.teardown, etc. directly now."""
+        """Legacy Phonebooth admin command group."""
         await ctx.send(
             "📞 **Phonebooth V2** — Commands:\n"
-            "`f.call` `f.hangup` `f.skip` `f.block` `f.fr` `f.anon`\n"
-            "`f.setup` `f.check` `f.repair` `f.dbstatus` `f.teardown`\n"
-            "`f.stats` `f.invite` `f.blocklist` `f.unblock` `f.kick`"
+            "`/call` `/hangup` `/skip` `/block` `/friendrequest` `/anon`\n"
+            "`/setup` `/check` `/repair` `@Fliphone dbstatus` `@Fliphone teardown`\n"
+            "`/stats` `/invite` `/blocklist` `/unblock` `/kick`"
         )
 
     @pb.command(name="setup")

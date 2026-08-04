@@ -105,7 +105,10 @@ class PhoneboothBot(commands.AutoShardedBot):
         shard_count = config.SHARD_COUNT if getattr(config, "SHARD_COUNT", 0) else None
 
         super().__init__(
-            command_prefix=config.PREFIXES,
+            # Mention commands remain available for restricted maintenance and do
+            # not require privileged Message Content access. Public controls use /
+            # commands; ordinary messages are reserved for active relay channels.
+            command_prefix=commands.when_mentioned,
             intents=intents,
             help_command=None,
             case_insensitive=True,
@@ -176,7 +179,7 @@ class PhoneboothBot(commands.AutoShardedBot):
         else:
             activity = discord.Activity(
                 type=discord.ActivityType.listening,
-                name=f"f.call  •  {len(self.guilds)} servers  •  Fliphone",
+                name=f"/call  •  {len(self.guilds)} servers  •  Fliphone",
             )
         await self.change_presence(
             activity=activity,
@@ -321,9 +324,9 @@ class PhoneboothBot(commands.AutoShardedBot):
                         "Fliphone connects your server with random strangers from other Discord servers.\n\n"
                         "**To get started:**\n"
                         "1. Go to the channel you want to use for calls\n"
-                        "2. Run `f.setup` in that channel\n"
-                        "3. Type `f.call` to connect with someone!\n\n"
-                        "**Commands:** `f.call` · `f.hangup` · `f.skip` · `f.anon` · `f.fr`\n\n"
+                        "2. Run `/setup` in that channel\n"
+                        "3. Use `/call` to connect with someone!\n\n"
+                        "**Commands:** `/call` · `/hangup` · `/skip` · `/anon` · `/friendrequest`\n\n"
                         "Need help? [Join our support server](<https://discord.gg/t3KHGqPuEP>)"
                     ),
                     color=0x5865F2,

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
 import re
@@ -19,11 +18,12 @@ from relay_policy import (
     custom_emoji_asset_url,
     custom_emoji_preview_url,
     extract_custom_emojis,
-    extract_gif_candidate,
+    extract_urls,
+    is_direct_gif_url,
+    is_provider_gif,
 )
 
 
-CAPTURE_SECONDS = 60
 MAX_CAPTURE_REQUESTS_PER_GUILD_MINUTE = 5
 MAX_EMOJIS_PER_SUBMISSION = 5
 
@@ -404,17 +404,7 @@ class GifSubmission(commands.Cog):
     def __init__(self, bot) -> None:
         self.bot = bot
         self.db = bot.db
-        self._captures: dict[tuple[int, int], tuple[float, str]] = {}
-        self._consumed: dict[int, float] = {}
-        self._lock = asyncio.Lock()
         self._guild_capture_requests: dict[int, deque[float]] = defaultdict(deque)
-
-    def is_consumed(self, message_id: int) -> bool:
-        expiry = self._consumed.get(message_id, 0)
-        if expiry <= time.monotonic():
-            self._consumed.pop(message_id, None)
-            return False
-        return True
 
     def _claim_guild_capture_slot(self, guild_id: int) -> bool:
         now = time.monotonic()
@@ -426,47 +416,17 @@ class GifSubmission(commands.Cog):
         requests.append(now)
         return True
 
-    async def consume_capture(self, message: discord.Message) -> bool:
-        key = (message.author.id, message.channel.id)
-        async with self._lock:
-            capture = self._captures.get(key)
-            if not capture:
-                return False
-            expiry, kind = capture
-            if expiry <= time.monotonic():
-                self._captures.pop(key, None)
-                return False
-
-            if kind == "gif":
-                url = extract_gif_candidate(message)
-                if not url:
-                    return False
-                self._captures.pop(key, None)
-                self._consumed[message.id] = time.monotonic() + 120
-            else:
-                all_emojis = extract_custom_emojis(message.content)
-                if not all_emojis:
-                    return False
-                selected_emojis = all_emojis[:MAX_EMOJIS_PER_SUBMISSION]
-                truncated = len(all_emojis) > MAX_EMOJIS_PER_SUBMISSION
-                self._captures.pop(key, None)
-                self._consumed[message.id] = time.monotonic() + 120
-
-        if kind == "gif":
-            return await self._submit_gif(message, url)
-        return await self._submit_emojis(message, selected_emojis, truncated)
-
-    async def _submit_gif(self, message: discord.Message, url: str) -> bool:
+    async def _submit_gif(self, ctx: commands.Context, url: str) -> bool:
         if await self.db.get_pending_gif_submission_by_url(url):
-            await message.channel.send("That GIF is already waiting for review.", delete_after=8)
+            await ctx.send("That GIF is already waiting for review.", delete_after=8)
             return True
         try:
             submission_id = await self.db.add_gif_submission(
-                url, message.author.id, message.guild.id, message.channel.id
+                url, ctx.author.id, ctx.guild.id, ctx.channel.id
             )
         except (asyncpg.UniqueViolationError, Exception) as exc:
             if isinstance(exc, asyncpg.UniqueViolationError) or "UNIQUE constraint" in str(exc):
-                await message.channel.send("That GIF is already waiting for review.", delete_after=8)
+                await ctx.send("That GIF is already waiting for review.", delete_after=8)
                 return True
             raise
 
@@ -474,13 +434,13 @@ class GifSubmission(commands.Cog):
         if review_channel:
             embed = discord.Embed(title="GIF Whitelist Submission", color=config.COLOR_WAIT)
             embed.description = url
-            embed.add_field(name="Submitted by", value=f"{message.author} (`{message.author.id}`)", inline=False)
-            embed.add_field(name="Server / channel", value=f"{message.guild.name} / {message.channel.mention}", inline=False)
+            embed.add_field(name="Submitted by", value=f"{ctx.author} (`{ctx.author.id}`)", inline=False)
+            embed.add_field(name="Server / channel", value=f"{ctx.guild.name} / {ctx.channel.mention}", inline=False)
             embed.set_image(url=url)
             embed.set_footer(text=f"Submission #{submission_id}")
             review_message = await review_channel.send(embed=embed, view=GifSubmissionReviewView())
             await self.db.set_gif_submission_review_message(submission_id, review_message.id)
-        await message.channel.send(
+        await ctx.send(
             f"GIF submission #{submission_id} was sent for review. It was not relayed.",
             delete_after=10,
         )
@@ -489,7 +449,7 @@ class GifSubmission(commands.Cog):
     async def _send_emoji_review(
         self,
         review_channel: discord.abc.Messageable,
-        message: discord.Message,
+        ctx: commands.Context,
         emoji: CustomEmojiCandidate,
         submission_id: int,
     ) -> None:
@@ -498,8 +458,8 @@ class GifSubmission(commands.Cog):
         embed.add_field(name="Name", value=emoji.name, inline=True)
         embed.add_field(name="ID", value=str(emoji.emoji_id), inline=True)
         embed.add_field(name="Animated", value="Yes" if emoji.animated else "No", inline=True)
-        embed.add_field(name="Submitted by", value=f"{message.author} (`{message.author.id}`)", inline=False)
-        embed.add_field(name="Server / channel", value=f"{message.guild.name} / {message.channel.mention}", inline=False)
+        embed.add_field(name="Submitted by", value=f"{ctx.author} (`{ctx.author.id}`)", inline=False)
+        embed.add_field(name="Server / channel", value=f"{ctx.guild.name} / {ctx.channel.mention}", inline=False)
         embed.set_image(url=custom_emoji_preview_url(emoji.emoji_id, emoji.animated))
         embed.set_footer(text=f"Emoji Submission #{submission_id}")
         review_message = await review_channel.send(embed=embed, view=EmojiSubmissionReviewView())
@@ -507,7 +467,7 @@ class GifSubmission(commands.Cog):
 
     async def _submit_emojis(
         self,
-        message: discord.Message,
+        ctx: commands.Context,
         emojis: list[CustomEmojiCandidate],
         truncated: bool,
     ) -> bool:
@@ -523,15 +483,15 @@ class GifSubmission(commands.Cog):
                 emoji.emoji_id,
                 emoji.name,
                 emoji.animated,
-                message.author.id,
-                message.guild.id,
-                message.channel.id,
+                ctx.author.id,
+                ctx.guild.id,
+                ctx.channel.id,
             )
             if status == "pending":
                 queued.append(f"#{submission_id} `{emoji.name}`")
                 if review_channel:
                     try:
-                        await self._send_emoji_review(review_channel, message, emoji, submission_id)
+                        await self._send_emoji_review(review_channel, ctx, emoji, submission_id)
                     except (discord.Forbidden, discord.HTTPException):
                         review_errors += 1
             elif status == "already_pending":
@@ -554,42 +514,64 @@ class GifSubmission(commands.Cog):
             lines.append("Emoji review channel is not configured, so moderators will not see them yet.")
         elif review_errors:
             lines.append(f"{review_errors} review message(s) could not be posted for moderators.")
-        await message.channel.send("\n".join(lines) or "No new emoji submissions were created.", delete_after=12)
+        await ctx.send("\n".join(lines) or "No new emoji submissions were created.", delete_after=12)
         return True
 
     @commands.hybrid_command(name="addgif")
     @commands.guild_only()
     @commands.cooldown(1, 30, commands.BucketType.user)
-    async def addgif(self, ctx: commands.Context) -> None:
-        """Capture the next GIF sent by this user in this channel for review."""
+    async def addgif(self, ctx: commands.Context, url: str) -> None:
+        """Submit a GIF URL for moderator review."""
         if await self.db.is_user_banned(ctx.author.id) or await self.db.is_guild_banned(ctx.guild.id):
             await ctx.send("You cannot submit GIFs to Fliphone.")
             return
         if not self._claim_guild_capture_slot(ctx.guild.id):
             await ctx.send("This server is submitting review items too quickly. Try again in a minute.")
             return
-        self._captures[(ctx.author.id, ctx.channel.id)] = (time.monotonic() + CAPTURE_SECONDS, "gif")
-        await ctx.send(
-            "Send the GIF you want to submit in this channel within 60 seconds. "
-            "It will stay local and will not be relayed."
+        candidate = next(
+            (
+                item
+                for item in extract_urls(url)
+                if is_provider_gif(item) or is_direct_gif_url(item)
+            ),
+            None,
         )
+        if not candidate:
+            await ctx.send("Provide a supported GIF URL, such as a Tenor, Giphy, Klipy, or direct `.gif` link.")
+            return
+        await self._submit_gif(ctx, candidate)
 
-    @commands.hybrid_command(name="addemoji", aliases=["addemojis", "addemote", "submitemoji"])
+    @commands.hybrid_command(name="addemoji", aliases=["addemote", "submitemoji"])
     @commands.guild_only()
     @commands.cooldown(1, 30, commands.BucketType.user)
-    async def addemoji(self, ctx: commands.Context) -> None:
-        """Capture up to 5 custom emojis sent by this user for review."""
+    async def addemoji(self, ctx: commands.Context, *, emojis: str) -> None:
+        """Submit up to 5 custom server emojis in one command for review."""
+        await self._handle_emoji_submission(ctx, emojis)
+
+    async def _handle_emoji_submission(self, ctx: commands.Context, emojis: str) -> None:
         if await self.db.is_user_banned(ctx.author.id) or await self.db.is_guild_banned(ctx.guild.id):
             await ctx.send("You cannot submit emojis to Fliphone.")
             return
         if not self._claim_guild_capture_slot(ctx.guild.id):
             await ctx.send("This server is submitting review items too quickly. Try again in a minute.")
             return
-        self._captures[(ctx.author.id, ctx.channel.id)] = (time.monotonic() + CAPTURE_SECONDS, "emoji")
-        await ctx.send(
-            f"Send **one message** with up to {MAX_EMOJIS_PER_SUBMISSION} custom server emojis "
-            "in this channel within 60 seconds. They will stay local and will not be relayed."
+        all_emojis = extract_custom_emojis(emojis)
+        if not all_emojis:
+            await ctx.send("Paste the custom server emojis into the `emojis` field of `/addemoji`.")
+            return
+        selected = all_emojis[:MAX_EMOJIS_PER_SUBMISSION]
+        await self._submit_emojis(
+            ctx,
+            selected,
+            truncated=len(all_emojis) > MAX_EMOJIS_PER_SUBMISSION,
         )
+
+    @commands.hybrid_command(name="addemojis")
+    @commands.guild_only()
+    @commands.cooldown(1, 30, commands.BucketType.user)
+    async def addemojis(self, ctx: commands.Context, *, emojis: str) -> None:
+        """Submit up to 5 custom server emojis in one command for review."""
+        await self._handle_emoji_submission(ctx, emojis)
 
     @commands.command(name="emojicleanup")
     @commands.guild_only()
@@ -626,13 +608,6 @@ class GifSubmission(commands.Cog):
             f"Emoji cleanup complete. Deleted **{deleted}** mirrored emoji(s). "
             f"Failed: **{failed}**."
         )
-
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message) -> None:
-        if message.author.bot or not message.guild:
-            return
-        await self.consume_capture(message)
-
 
 async def setup(bot) -> None:
     bot.add_view(GifSubmissionReviewView())

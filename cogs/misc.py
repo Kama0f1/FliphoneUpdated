@@ -17,13 +17,14 @@ class Misc(commands.Cog, name="Misc"):
     def __init__(self, bot) -> None:
         self.bot = bot
 
-    @commands.command(name="ping")
+    @commands.hybrid_command(name="ping")
     async def ping(self, ctx: commands.Context) -> None:
         """Measure gateway, command, REST, and DB latency."""
         started = time.perf_counter()
+        invoked_at = ctx.interaction.created_at if ctx.interaction else ctx.message.created_at
         received_delay_ms = max(
             0,
-            int((datetime.now(timezone.utc) - ctx.message.created_at).total_seconds() * 1000),
+            int((datetime.now(timezone.utc) - invoked_at).total_seconds() * 1000),
         )
         probe = await ctx.send("Pinging...")
         sent_ms = int((time.perf_counter() - started) * 1000)
@@ -55,7 +56,7 @@ class Misc(commands.Cog, name="Misc"):
         embed.set_footer(text="Command Delay is how long it took Discord to reach the bot.")
         await probe.edit(content=None, embed=embed)
 
-    @commands.command(name="shards")
+    @commands.hybrid_command(name="shards")
     async def shards(self, ctx: commands.Context) -> None:
         """Show sharding info (if sharded)."""
         shard_count = getattr(self.bot, "shard_count", None)

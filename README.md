@@ -12,7 +12,7 @@
 
 Fliphone connects Discord servers for real-time conversations. It supports 1:1 calls and **group rooms** with up to 5 servers chatting at once.
 
-Messages are relayed in real time. A short in-memory rolling excerpt is kept temporarily so users can report unsafe conversations; see the Privacy Policy for exact retention.
+Messages are relayed in real time. Conversation text is not retained in Fliphone's database or in a post-call cache; report context is fetched from Discord only when a user submits a report.
 
 ---
 
@@ -60,20 +60,20 @@ an owner or moderator with **Manage Roles** may be required to edit the overwrit
 In the channel you want to use as the phonebooth, run:
 
 ```
-f.setup
+/setup
 ```
 
-You can also use `/setup`. Use `/check` for an exact permission diagnosis and `/repair` after correcting permissions.
+Use `/check` for an exact permission diagnosis and `/repair` after correcting permissions.
 
-`f.setup` is also the reset button: it clears stale call/queue/room state, removes old Fliphone webhooks, creates a fresh webhook, saves the channel, and tests avatar delivery.
+`/setup` is also the reset button: it clears stale call/queue/room state, removes old Fliphone webhooks, creates a fresh webhook, saves the channel, and tests avatar delivery.
 
 If setup says the server role is missing permissions, use the re-invite link. If it says a channel/category is
-overriding permissions, fix that overwrite instead. Use `f.teardown` only when you want to remove Fliphone completely.
+overriding permissions, fix that overwrite instead. Use `@Fliphone teardown` only when you want to remove Fliphone completely.
 
 ### 3. Start a call
 
 ```
-f.call
+/call
 ```
 
 If another server is waiting, you connect instantly. Otherwise you join the queue (auto-cancels after 10 minutes).
@@ -82,53 +82,56 @@ If another server is waiting, you connect instantly. Otherwise you join the queu
 
 ## Command Reference
 
-**Prefix:** `f.` (also `F.` — case-insensitive)
+Public commands use Discord application commands. Restricted maintenance commands use `@Fliphone command`.
 
 ### 📞 Calling
 
-| Command | Aliases | Permission | Description |
-|---|---|---|---|
-| `f.call` | `f.c`, `f.dial`, `f.connect` | Everyone | Join the queue or connect instantly |
-| `f.hangup` | `f.h`, `f.disconnect`, `f.bye` | Everyone | End the active call or leave the queue |
-| `f.skip` | `f.s`, `f.next` | Everyone | Hang up and immediately search for a new call |
-| `f.status` | `f.pbstatus` | Everyone | Show current status (idle / queued / in call) |
-| `f.block` | — | Everyone | Block the server you're currently talking to |
-| `f.anon` | `f.mask`, `f.anonymous` | Everyone | Toggle your personal tarot anon identity |
-| `f.fr` | `f.friendrequest` | Everyone | Share your username as a friend-request card |
-| `f.notify` | `f.notifications` | Everyone | Toggle queue DM notifications (opt-in) |
-| `f.profile` | `f.settings`, `f.me` | Everyone | Show your settings and current server/channel state |
-| `f.report` | — | Everyone | Report your active or most recent call |
-| `f.gifmode` | — | Server Admin | Set GIF policy: `enabled`, `limited`, or `disabled` |
-| `f.stats` | — | Everyone | Show global call statistics |
-| `f.invite` | — | Everyone | Get the bot invite link |
+| Command | Permission | Description |
+|---|---|---|
+| `/call` | Everyone | Join the queue or connect instantly |
+| `/hangup` | Everyone | End the active call or leave the queue |
+| `/skip` | Everyone | Hang up and immediately search for a new call |
+| `/status` | Everyone | Show current status |
+| `/block` | Everyone | Block the connected server or room station |
+| `/anon` | Everyone | Toggle your personal tarot anon identity |
+| `/friendrequest` | Everyone | Share your username as a friend-request card |
+| `/privacy` | Everyone | View or change your message relay opt-out |
+| `/notify` | Everyone | Toggle queue DM notifications |
+| `/profile` | Everyone | Show your settings, XP, ranks, and banner |
+| `/report` | Everyone | Report your active or most recent call |
+| `/addgif` | Everyone | Submit a GIF URL for review |
+| `/addemoji` or `/addemojis` | Everyone | Submit up to five custom emojis in one command |
+| `/stats` | Everyone | Show global call statistics |
+| `/invite` | Everyone | Get the bot invite link |
 
 ### 📡 Group Rooms
 
-| Command | Aliases | Permission | Description |
-|---|---|---|---|
-| `f.room` | `f.r` | Everyone | Join a group room (up to 6 servers) |
-| `f.roomleave` | `f.rl` | Everyone | Leave your current room |
-| `f.roomskip` | `f.rs` | Everyone | Leave and immediately search for a new room |
-| `f.roomstatus` | `f.rst` | Everyone | Show current room info |
-| `f.roomkick` | `f.rk` | Everyone | Start a vote to kick a station (need 3+ servers) |
+| Command | Permission | Description |
+|---|---|---|
+| `/room` | Everyone | Join a group room |
+| `/roomcreate` | Everyone | Create a fresh group room |
+| `/roomleave` | Everyone | Leave your current room |
+| `/roomskip` | Everyone | Leave and immediately search for a new room |
+| `/roomstatus` | Everyone | Show current room info |
+| `/roomkick` | Everyone | Start a vote to kick a station |
 
 ### ⚙️ Server Setup
 
-| Command | Aliases | Permission | Description |
-|---|---|---|---|
-| `f.setup` | — | Manage Channels | Reset and fully configure this channel in one step |
-| `f.check` | `f.setupcheck`, `f.doctor` | Manage Channels | Diagnose setup, permissions, webhook, and call state |
-| `f.repair` | `f.fixsetup`, `f.fix` | Manage Channels | Reset and rebuild the configured channel |
-| `f.dbstatus` | `f.database`, `f.db` | Manage Channels | Show database health and safe row counts |
-| `f.teardown` | `f.remove` | Manage Channels | Remove Fliphone from this server (clears all data) |
-| `f.blocklist` | `f.blocked` | Manage Channels | List servers your server has blocked |
-| `f.unblock` | — | Manage Channels | Unblock a server by its ID |
-| `f.kick` | — | Manage Channels | Force-disconnect the active call |
+| Command | Permission | Description |
+|---|---|---|
+| `/setup` | Manage Channels | Reset and fully configure this channel in one step |
+| `/check` | Manage Channels | Diagnose setup, permissions, webhook, and call state |
+| `/repair` | Manage Channels | Reset and rebuild the configured channel |
+| `@Fliphone dbstatus` | Trusted staff | Show database health and safe row counts |
+| `@Fliphone teardown` | Manage Channels | Remove Fliphone from this server |
+| `/blocklist` | Manage Channels | List servers your server has blocked |
+| `/unblock` | Manage Channels | Unblock a server by its ID |
+| `/kick` | Manage Channels | Force-disconnect the active call |
 
 ### Restricted Tools
 
 Owner and trusted moderator commands are intentionally hidden from normal help.
-Use `f.sudohelp` to view moderation panels, GIF review tools, global bans,
+Use `@Fliphone sudohelp` to view moderation panels, GIF review tools, global bans,
 censor controls, and guild audit tools.
 
 ---
@@ -136,19 +139,19 @@ censor controls, and guild audit tools.
 ## How Calls Work
 
 ```
-Server A  ──f.call──►  Queue  ◄──f.call──  Server B
+Server A  ──/call──►  Queue  ◄──/call──  Server B
                          │
                     [matched!]
                          │
 Server A  ◄──relay──   Bot  ──relay──►  Server B
 ```
 
-1. Admin runs `f.setup` in the chosen channel — registers it and creates a webhook.
-2. A user runs `f.call` — bot looks for a match from a *different* server (respecting block lists).
+1. Admin runs `/setup` in the chosen channel — registers it and creates a webhook.
+2. A user runs `/call` — bot looks for a match from a *different* server (respecting block lists).
    - **Match found** → both channels get a *Connected!* message and relay begins.
    - **No match** → channel enters the queue (10-minute timeout, then auto-cancels).
 3. Every non-command message sent in a connected channel is relayed to the partner.
-4. Either side runs `f.hangup` → call ends, stats logged, both channels notified.
+4. Either side runs `/hangup` → call ends, stats logged, both channels notified.
 
 ### Relay priority
 
@@ -172,13 +175,13 @@ Server A  ◄──relay──   Bot  ──relay──►  Server B
 
 Group rooms work like a conference call for up to 6 servers. Each server is assigned a **NATO station name** (Alpha, Bravo, Charlie, Delta, Echo, Foxtrot) — your real server name is never revealed.
 
-- Run `f.room` to join. If an active room has space and you haven't been in it, you slot straight in.
+- Run `/room` to join. If an active room has space and you haven't been in it, you slot straight in.
 - If no room is available, a new room is created and waits for others.
 - A room becomes **active** once 2+ servers have joined.
 - New servers can join active rooms up to the maximum size of 6.
 - If fewer than 2 servers remain after someone leaves, the room closes automatically.
 
-**Vote kick:** Any server can run `f.roomkick <Station>` to start a majority vote to remove a misbehaving station (requires 3+ servers in the room). The vote lasts 60 seconds.
+**Vote kick:** Any server can run `/roomkick` to start a majority vote to remove a misbehaving station (requires 3+ servers in the room). The vote lasts 60 seconds.
 
 ---
 
@@ -192,8 +195,6 @@ Server admins can control how GIFs are handled in their server's calls:
 | `limited` | Only Tenor, Giphy, and Klipy links are relayed — direct `.gif` URLs blocked |
 | `disabled` | All GIFs are blocked — none sent or received |
 
-Set with: `f.gifmode enabled` / `f.gifmode limited` / `f.gifmode disabled`
-
 When one side has restrictions, both sides are notified at the start of the call.
 
 ---
@@ -205,7 +206,6 @@ When one side has restrictions, both sides are notified at the start of the call
 DISCORD_TOKEN=your_bot_token_here
 
 # Optional
-COMMAND_PREFIX=f.              # Default: f.
 DATABASE_URL=                  # PostgreSQL URL. If empty, SQLite is used.
 DB_PATH=phonebooth.db          # SQLite file path for fallback/migration
 DATABASE_POOL_SIZE=5           # PostgreSQL connection pool size
@@ -274,13 +274,13 @@ Enable these in the [Discord Developer Portal](https://discord.com/developers/ap
 
 | Table | Purpose |
 |---|---|
-| `guild_config` | One row per server that has run `f.setup` |
+| `guild_config` | One row per server that has run `/setup` |
 | `queue` | Channels currently waiting for a match |
 | `connections` | Active, live 1:1 calls |
 | `call_history` | Completed calls (used for stats) |
 | `blocked_guilds` | Server-level block list |
 | `banned_users` | Bot-wide user ban list |
-| `custom_words` | Custom censor words added via `f.censor` |
+| `custom_words` | Custom censor words added with the restricted `@Fliphone censor` command |
 | `gif_reports` | GIF URLs reported by users, pending review |
 | `profile_banners` | Saved user profile banner choices |
 | `user_chat_stats` | Global user XP, chat count, and ranking data |
@@ -298,7 +298,7 @@ Enable these in the [Discord Developer Portal](https://discord.com/developers/ap
 - [Privacy Policy](https://gist.github.com/Kama0f1/431f01bbbf1ae6243505778376ba0fb3)
 - [Terms of Service](https://gist.github.com/Kama0f1/085bf38fb03e3c84d99f2ff9afc410af)
 
-Ordinary message content is not stored in PostgreSQL or weekly backups. Temporary report excerpts are handled as described in the Privacy Policy.
+Ordinary message content is not stored in PostgreSQL or weekly backups. Report context is fetched from Discord only when a user submits `/report`, posted to a private Discord moderation channel, and discarded locally. Users can disable relay processing with `/privacy optout`.
 
 ---
 

@@ -1,13 +1,7 @@
 """
 cogs/room.py – Multi-server group room feature for Fliphone.
 
-Commands
---------
-f.room / f.r           – Join a group room of up to 5 servers
-f.roomleave / f.rl     – Leave the current room
-f.roomskip / f.rs      – Leave and immediately re-queue for a new room
-f.roomstatus / f.rst   – Show current room info
-f.roomkick / f.rk      – Start a majority vote to kick a station
+Public commands use Discord slash commands such as /room, /roomleave, and /roomskip.
 
 How rooms work
 --------------
@@ -444,9 +438,6 @@ class Room(commands.Cog):
     async def _close_room(self, room_id: int) -> None:
         """Close a room and start the same report-log expiry used by calls."""
         await self.db.close_room(room_id)
-        report_cog = self.bot.get_cog("Report")
-        if report_cog:
-            report_cog.clear_log(-int(room_id))
 
     async def _inactivity_timer(
         self,
@@ -501,7 +492,7 @@ class Room(commands.Cog):
                 try:
                     await ch.send(
                         f"📵 No other servers joined within **{ROOM_QUEUE_TIMEOUT_MINUTES} minutes**. "
-                        f"Use `f.room` to try again!"
+                        f"Use `/room` to try again!"
                     )
                 except discord.HTTPException:
                     pass
@@ -545,7 +536,7 @@ class Room(commands.Cog):
                         try:
                             await channel.send(
                                 "📵 **Room closed** — not enough servers remaining.\n"
-                                "Use `f.room` to start a new one!"
+                                "Use `/room` to start a new one!"
                             )
                         except discord.HTTPException:
                             pass
@@ -571,7 +562,7 @@ class Room(commands.Cog):
         *,
         broadcast_reason: str,
         notify_leaver: bool = True,
-        leaver_msg: str = "📵 You have been removed from the room. Use `f.room` to join a new one!",
+        leaver_msg: str = "📵 You have been removed from the room. Use `/room` to join a new one!",
     ) -> None:
         """
         Remove one member, clean up their in-memory state, notify the room,
@@ -603,7 +594,7 @@ class Room(commands.Cog):
                     try:
                         await rch.send(
                             "📵 **Room closed** — not enough servers remaining.\n"
-                            "Use `f.room` to start a new one!"
+                            "Use `/room` to start a new one!"
                         )
                     except discord.HTTPException:
                         pass
@@ -663,7 +654,7 @@ class Room(commands.Cog):
                     try:
                         await rch.send(
                             "📵 **Room closed** — not enough servers remaining.\n"
-                            "Use `f.room` to start a new one!"
+                            "Use `/room` to start a new one!"
                         )
                     except discord.HTTPException:
                         pass
@@ -975,13 +966,18 @@ class Room(commands.Cog):
         # ── User ban check ────────────────────────────────────────────────────
         phonebooth = self.bot.get_cog("Phonebooth")
         if phonebooth and hasattr(phonebooth, "_get_user_relay_policy"):
-            is_banned, anon = await phonebooth._get_user_relay_policy(message.author.id)
+            is_banned, anon, content_opt_out = await phonebooth._get_user_relay_policy(
+                message.author.id
+            )
         else:
-            is_banned, anon = await asyncio.gather(
+            is_banned, anon, content_opt_out = await asyncio.gather(
                 self.db.is_user_banned(message.author.id),
                 self.db.is_user_anonymous(message.author.id),
+                self.db.is_content_opted_out(message.author.id),
             )
 
+        if content_opt_out:
+            return
         if is_banned:
             try:
                 await message.channel.send(
@@ -1221,7 +1217,7 @@ class Room(commands.Cog):
             if unapproved:
                 try:
                     await message.channel.send(
-                        "That GIF source is not approved. Run `f.addgif`, then send it again within 60 seconds for review.",
+                        "That GIF source is not approved. Submit its URL with `/addgif` for review.",
                         delete_after=8,
                     )
                 except discord.HTTPException:
@@ -1234,16 +1230,6 @@ class Room(commands.Cog):
         asyncio.create_task(self.db.increment_room_msg_count(room["id"]))
         asyncio.create_task(self.db.increment_room_member_msg_count(message.channel.id))
         self._reset_inactivity(message.channel.id, room["id"])
-        report_cog = self.bot.get_cog("Report")
-        if report_cog:
-            report_cog.record_message(
-                conn_id=-int(room["id"]),
-                user_id=message.author.id,
-                username=str(message.author),
-                guild_id=message.guild.id,
-                guild_name=message.guild.name,
-                content=content.strip(),
-            )
         asyncio.create_task(
             self.db.add_chat_xp(message.author.id, message.guild.id, random.randint(12, 22), 60)
         )
@@ -1296,7 +1282,7 @@ class Room(commands.Cog):
                     try:
                         await other_ch.send(
                             "⚠️ Room relay stopped for this server because webhook repair failed. "
-                            "An admin should run `f.repair` in this channel."
+                            "An admin should run `/repair` in this channel."
                         )
                         self._broken_webhook_notified.add(other["channel_id"])
                     except discord.HTTPException:
@@ -1388,18 +1374,22 @@ class Room(commands.Cog):
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot or not message.guild:
             return
-        gif_cog = self.bot.get_cog("GifSubmission")
-        if gif_cog and (gif_cog.is_consumed(message.id) or await gif_cog.consume_capture(message)):
+        rm, room, members = await self._get_relay_context(message.channel.id)
+        if not rm:
+            return
+        if not room or room["status"] != "active":
+            return
+        phonebooth = self.bot.get_cog("Phonebooth")
+        if phonebooth and hasattr(phonebooth, "_get_user_relay_policy"):
+            _, _, content_opt_out = await phonebooth._get_user_relay_policy(message.author.id)
+        else:
+            content_opt_out = await self.db.is_content_opted_out(message.author.id)
+        if content_opt_out:
             return
         if is_local_only(message.content or ""):
             return
         ctx = await self.bot.get_context(message)
         if ctx.valid:
-            return
-        rm, room, members = await self._get_relay_context(message.channel.id)
-        if not rm:
-            return
-        if not room or room["status"] != "active":
             return
         lock = self._relay_locks.setdefault(int(room["id"]), asyncio.Lock())
         async with lock:
@@ -1425,18 +1415,21 @@ class Room(commands.Cog):
         if await self.db.is_guild_banned(ctx.guild.id):
             await finish("🚫 This server is banned from using Fliphone.")
             return
+        if await self.db.is_content_opted_out(ctx.author.id):
+            await finish("Message relay is disabled for your account. Use `/privacy optin` before joining.")
+            return
 
         cfg = await self.db.get_guild_config(ctx.guild.id)
         if not cfg:
-            await finish("❌ Fliphone isn't set up in this server. An admin should run `f.setup` first.")
+            await finish("❌ Fliphone isn't set up in this server. An admin should run `/setup` first.")
             return
 
         if await self.db.get_connection(ctx.channel.id):
-            await finish("📞 This channel is in an active 1:1 call. Use `f.hangup` first.")
+            await finish("📞 This channel is in an active 1:1 call. Use `/hangup` first.")
             return
 
         if await self.db.get_room_member(ctx.channel.id):
-            await finish("📡 Already in a room! Use `f.roomleave` to leave first.")
+            await finish("📡 Already in a room! Use `/roomleave` to leave first.")
             return
 
         # Kick-cooldown check
@@ -1458,14 +1451,14 @@ class Room(commands.Cog):
         except TimeoutError:
             await finish(
                 "❌ Room setup timed out while checking this channel's webhook. "
-                "Ask an admin to run `f.repair` here, then try again."
+                "Ask an admin to run `/repair` here, then try again."
             )
             return
         if not wh_url:
             await finish(
                 "❌ Fliphone cannot join a room because webhook relay is unavailable.\n"
                 f"Missing or broken: **{', '.join(permission_issues)}**\n"
-                "A server admin should run `/check` or `f.check` in this channel."
+                "A server admin should run `/check` in this channel."
             )
             return
 
@@ -1514,9 +1507,9 @@ class Room(commands.Cog):
                         f"There are **{count}** server(s) here right now: {others_str}.\n\n"
                         "Say hello! 👋\n"
                         "**Tips:**\n"
-                        "• `f.roomstatus` — see who's in the room\n"
-                        "• `f.roomkick <station>` — start a vote to remove a station\n"
-                        "• `f.roomleave` — leave quietly  ·  `f.roomskip` — skip to a new room\n\n"
+                        "• `/roomstatus` — see who's in the room\n"
+                        "• `/roomkick` — start a vote to remove a station\n"
+                        "• `/roomleave` — leave quietly  ·  `/roomskip` — skip to a new room\n\n"
                         "*By continuing you agree to be respectful.*"
                     ),
                     color=config.COLOR_OK,
@@ -1563,7 +1556,7 @@ class Room(commands.Cog):
                     "You joined as **Station Alpha**!\n"
                     f"Waiting for up to **{ROOM_QUEUE_TIMEOUT_MINUTES} minutes** for other servers.\n"
                     "When a 2nd server joins, the room goes live automatically.\n\n"
-                    "Use `f.roomleave` to cancel."
+                    "Use `/roomleave` to cancel."
                 ),
                 color=config.COLOR_WAIT,
             )
@@ -1591,8 +1584,8 @@ class Room(commands.Cog):
                 )
                 await progress.edit(
                     content=(
-                        "❌ The room search timed out. Please try `f.room` again. "
-                        "If it repeats, ask an admin to run `f.check`."
+                        "❌ The room search timed out. Please try `/room` again. "
+                        "If it repeats, ask an admin to run `/check`."
                     ),
                     embed=None,
                 )
@@ -1604,19 +1597,19 @@ class Room(commands.Cog):
                 )
                 await progress.edit(
                     content=(
-                        "❌ Something interrupted the room search. Please try `f.room` again. "
-                        "If it repeats, ask an admin to run `f.check`."
+                        "❌ Something interrupted the room search. Please try `/room` again. "
+                        "If it repeats, ask an admin to run `/check`."
                     ),
                     embed=None,
                 )
 
-    @commands.command(name="room", aliases=["r"])
+    @commands.hybrid_command(name="room", aliases=["r"])
     @commands.guild_only()
     async def room(self, ctx: commands.Context) -> None:
         """Join a group room of up to 5 servers."""
         await self._guarded_join(ctx)
 
-    @commands.command(name="roomcreate", aliases=["rc"])
+    @commands.hybrid_command(name="roomcreate", aliases=["rc"])
     @commands.guild_only()
     async def roomcreate(self, ctx: commands.Context) -> None:
         """Create a fresh room instead of joining an available one."""
@@ -1624,13 +1617,13 @@ class Room(commands.Cog):
 
     # ── f.roomleave ───────────────────────────────────────────────────────────
 
-    @commands.command(name="roomleave", aliases=["rl"])
+    @commands.hybrid_command(name="roomleave", aliases=["rl"])
     @commands.guild_only()
     async def roomleave(self, ctx: commands.Context) -> None:
         """Leave the current room without re-queuing."""
         rm = await self.db.get_room_member(ctx.channel.id)
         if not rm:
-            await ctx.send("📡 You're not in a room. Use `f.room` to join one!")
+            await ctx.send("📡 You're not in a room. Use `/room` to join one!")
             return
         await self._remove_member(
             ctx.channel.id,
@@ -1639,18 +1632,18 @@ class Room(commands.Cog):
             notify_leaver=False,
         )
         await ctx.send(
-            "📵 You left the room. Use `f.room` to join another one!"
+            "📵 You left the room. Use `/room` to join another one!"
         )
 
     # ── f.roomskip ────────────────────────────────────────────────────────────
 
-    @commands.command(name="roomskip", aliases=["rs"])
+    @commands.hybrid_command(name="roomskip", aliases=["rs"])
     @commands.guild_only()
     async def roomskip(self, ctx: commands.Context) -> None:
         """Leave the current room and immediately search for a new one."""
         rm = await self.db.get_room_member(ctx.channel.id)
         if not rm:
-            await ctx.send("📡 You're not in a room. Use `f.room` to join one!")
+            await ctx.send("📡 You're not in a room. Use `/room` to join one!")
             return
         await self._remove_member(
             ctx.channel.id,
@@ -1664,13 +1657,13 @@ class Room(commands.Cog):
 
     # ── f.roomstatus ─────────────────────────────────────────────────────────
 
-    @commands.command(name="roomstatus", aliases=["rst"])
+    @commands.hybrid_command(name="roomstatus", aliases=["rst"])
     @commands.guild_only()
     async def roomstatus(self, ctx: commands.Context) -> None:
         """Show current room info."""
         rm = await self.db.get_room_member(ctx.channel.id)
         if not rm:
-            await ctx.send("📡 You're not in a room. Use `f.room` to join one!")
+            await ctx.send("📡 You're not in a room. Use `/room` to join one!")
             return
         room    = await self.db.get_room_by_id(rm["room_id"])
         members = await self.db.get_room_members(rm["room_id"])
@@ -1691,13 +1684,13 @@ class Room(commands.Cog):
 
     # ── f.roomkick ────────────────────────────────────────────────────────────
 
-    @commands.command(name="roomkick", aliases=["rk"])
+    @commands.hybrid_command(name="roomkick", aliases=["rk"])
     @commands.guild_only()
     @commands.cooldown(1, 30, commands.BucketType.channel)
     async def roomkick(self, ctx: commands.Context, *, station_name: str = "") -> None:
         """
         Start a majority vote to kick a station from the room.
-        Usage: f.roomkick <station>   e.g. f.roomkick Bravo
+        Usage: /roomkick station:Bravo
         """
         rm = await self.db.get_room_member(ctx.channel.id)
         if not rm:
@@ -1724,7 +1717,7 @@ class Room(commands.Cog):
             )
             await ctx.send(
                 f"❌ Please specify a station to kick. Available: {valid}\n"
-                f"Usage: `f.roomkick <Station>`"
+                "Use the `station_name` option in `/roomkick`."
             )
             return
 
