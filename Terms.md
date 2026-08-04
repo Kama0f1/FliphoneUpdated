@@ -90,7 +90,7 @@ Users may report an active or recent conversation with `/report`.
 
 Reports must contain an honest explanation. Users may provide a relevant media link. False, abusive, misleading, or spam reports are prohibited.
 
-When a report is submitted, Fliphone may fetch limited recent context from the reporting Discord channel and send it to a private Discord moderation channel. The report process and retention rules are described in the Privacy Policy.
+When a report is submitted, Fliphone may fetch the full available conversation window for the selected call or room from the reporting Discord channel and send it to a private Discord moderation channel. The report process, exclusions, and retention rules are described in the Privacy Policy.
 
 Authorized Fliphone moderators may review reports, resolve reports, restrict users or servers, maintain safety lists, remove reviewed content, and report serious violations to Discord or relevant authorities.
 

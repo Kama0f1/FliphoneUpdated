@@ -331,6 +331,7 @@ CREATE TABLE IF NOT EXISTS call_reports (
     created_at          TEXT NOT NULL
     ,review_msg_id      INTEGER
     ,review_channel_id  INTEGER
+    ,review_message_ids TEXT
 );
 """
 
@@ -598,6 +599,7 @@ CREATE TABLE IF NOT EXISTS call_reports (
     created_at          TEXT NOT NULL
     ,review_msg_id      BIGINT
     ,review_channel_id  BIGINT
+    ,review_message_ids TEXT
 );
 """
 
@@ -752,6 +754,7 @@ class Database:
             ("gif_reports", "review_channel_id", "BIGINT" if self.backend == "postgres" else "INTEGER"),
             ("call_reports", "review_msg_id", "BIGINT" if self.backend == "postgres" else "INTEGER"),
             ("call_reports", "review_channel_id", "BIGINT" if self.backend == "postgres" else "INTEGER"),
+            ("call_reports", "review_message_ids", "TEXT"),
             ("emoji_submissions", "app_emoji_animated", "INTEGER NOT NULL DEFAULT 0"),
             ("user_preferences", "content_opt_out", "INTEGER NOT NULL DEFAULT 0"),
         )
@@ -2392,6 +2395,26 @@ class Database:
         await self._execute(
             "UPDATE call_reports SET review_msg_id = ?, review_channel_id = ? WHERE id = ?",
             (message_id, channel_id, report_id),
+        )
+
+    async def set_call_report_review_messages(
+        self, report_id: int, channel_id: int, message_ids: Sequence[int]
+    ) -> None:
+        """Store every Discord evidence message used by a call report."""
+        normalized = [int(message_id) for message_id in message_ids]
+        first_message_id = normalized[0] if normalized else None
+        await self._execute(
+            """
+            UPDATE call_reports
+            SET review_msg_id = ?, review_channel_id = ?, review_message_ids = ?
+            WHERE id = ?
+            """,
+            (
+                first_message_id,
+                channel_id,
+                ",".join(str(message_id) for message_id in normalized),
+                report_id,
+            ),
         )
 
     async def get_recent_call_for_guild(self, guild_id):

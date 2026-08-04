@@ -13,7 +13,7 @@ When a report is submitted:
   1. The reporter provides a reason and optionally attaches media.
   2. The bot looks up who they were connected to via active connection,
      the Phonebooth cog's last_calls cache, or call_history in the DB.
-  3. Recent context is fetched on demand from the reporting Discord channel.
+  3. The full eligible call window is fetched on demand from the reporting Discord channel.
   4. The context is sent to the private report channel and discarded locally.
 """
 
@@ -36,8 +36,7 @@ from relay_policy import is_local_only
 # Channel to send report log embeds to
 REPORT_LOG_CHANNEL_ID = int(os.getenv("USER_REPORT_LOG_CHANNEL_ID", 1497205915089371186))
 
-MAX_CONTEXT_MESSAGES = 50
-MAX_CONTEXT_SCAN = 100
+REPORT_TRANSCRIPT_CHUNK_BYTES = 7_500_000
 REPORT_EVIDENCE_RETENTION_DAYS = 30
 
 
@@ -217,17 +216,32 @@ class Report(commands.Cog):
         self._cleanup_expired_reports.cancel()
 
     async def _delete_call_report_review_message(self, report: dict) -> None:
-        message_id = report.get("review_msg_id")
         channel_id = report.get("review_channel_id")
-        if not message_id or not channel_id:
+        if not channel_id:
+            return
+        message_ids: list[int] = []
+        stored_ids = str(report.get("review_message_ids") or "")
+        for value in stored_ids.split(","):
+            try:
+                message_ids.append(int(value.strip()))
+            except (TypeError, ValueError):
+                continue
+        legacy_message_id = report.get("review_msg_id")
+        if legacy_message_id and int(legacy_message_id) not in message_ids:
+            message_ids.insert(0, int(legacy_message_id))
+        if not message_ids:
             return
         try:
             channel = self.bot.get_channel(int(channel_id))
             if channel is None:
                 channel = await self.bot.fetch_channel(int(channel_id))
-            await channel.get_partial_message(int(message_id)).delete()
         except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError):
-            pass
+            return
+        for message_id in message_ids:
+            try:
+                await channel.get_partial_message(message_id).delete()
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError):
+                continue
 
     # ── Private review evidence retention ─────────────────────────────────────
 
@@ -275,10 +289,14 @@ class Report(commands.Cog):
             room = await self.db.get_room_by_id(room_member["room_id"])
             return {
                 "other_guild_id": target["guild_id"],
-                "started_at": room["created_at"] if room else None,
+                "started_at": room_member.get("joined_at") or (room["created_at"] if room else None),
                 "ended_at": None,
                 "active": True,
                 "conn_id": -int(room_member["room_id"]),
+                "station_guild_ids": {
+                    str(item["station"]): int(item["guild_id"])
+                    for item in members
+                },
             }
 
         # 2. In-memory cache — survives skips and instant hangups
@@ -331,8 +349,8 @@ class Report(commands.Cog):
         started_at = self._parse_utc(call.get("started_at"))
         ended_at = self._parse_utc(call.get("ended_at"))
         history_kwargs: dict[str, object] = {
-            "limit": MAX_CONTEXT_SCAN,
-            "oldest_first": False,
+            "limit": None,
+            "oldest_first": True,
         }
         if started_at:
             history_kwargs["after"] = started_at - timedelta(seconds=1)
@@ -343,8 +361,6 @@ class Report(commands.Cog):
             messages = [message async for message in channel.history(**history_kwargs)]
         except (discord.Forbidden, discord.HTTPException, AttributeError):
             return []
-        messages.reverse()
-
         local_user_ids = {
             int(message.author.id)
             for message in messages
@@ -377,27 +393,109 @@ class Report(commands.Cog):
                 f"[attachment: {attachment.filename}] {attachment.url}"
                 for attachment in message.attachments
             ]
-            combined = "\n".join(part for part in (content.strip(), *attachment_lines) if part)
+            sticker_lines = [
+                f"[sticker: {sticker.name}] {sticker.url}"
+                for sticker in getattr(message, "stickers", [])
+            ]
+            embed_lines: list[str] = []
+            for embed in getattr(message, "embeds", []):
+                embed_author = getattr(getattr(embed, "author", None), "name", None)
+                embed_footer = getattr(getattr(embed, "footer", None), "text", None)
+                parts = [embed_author, embed.title, embed.description, embed.url]
+                parts.extend(
+                    f"{field.name}: {field.value}" for field in getattr(embed, "fields", [])
+                )
+                if embed_footer:
+                    parts.append(embed_footer)
+                image_url = getattr(getattr(embed, "image", None), "url", None)
+                if image_url:
+                    parts.append(image_url)
+                embed_text = " | ".join(str(part).strip() for part in parts if part)
+                if embed_text:
+                    embed_lines.append(f"[embed] {embed_text}")
+            reaction_parts = [
+                f"{reaction.emoji} x{reaction.count}"
+                for reaction in getattr(message, "reactions", [])
+            ]
+            reaction_lines = [f"[reactions] {', '.join(reaction_parts)}"] if reaction_parts else []
+            reference = getattr(message, "reference", None)
+            reference_id = getattr(reference, "message_id", None)
+            reply_lines = [f"[reply to Discord message {reference_id}]"] if reference_id else []
+            combined = "\n".join(
+                part
+                for part in (
+                    content.strip(),
+                    *reply_lines,
+                    *attachment_lines,
+                    *sticker_lines,
+                    *embed_lines,
+                    *reaction_lines,
+                )
+                if part
+            )
             if not combined:
                 continue
+
+            username = str(getattr(message.author, "display_name", message.author))
+            webhook_guild_id = int(call["other_guild_id"])
+            webhook_guild_name = "Relayed side"
+            station_guild_ids = call.get("station_guild_ids") or {}
+            if is_webhook and station_guild_ids:
+                station = username.split(" ", 2)[1] if username.startswith("Station ") else None
+                webhook_guild_id = int(station_guild_ids.get(station, 0))
+                webhook_guild_name = f"Station {station}" if station else "Unknown room station"
 
             entries.append(
                 {
                     "user_id": None if is_webhook else int(message.author.id),
-                    "username": str(getattr(message.author, "display_name", message.author)),
+                    "username": username,
                     "guild_id": (
-                        int(call["other_guild_id"])
+                        webhook_guild_id
                         if is_webhook
                         else int(reporting_guild_id)
                     ),
-                    "guild_name": "Relayed side" if is_webhook else "Reporting side",
+                    "guild_name": webhook_guild_name if is_webhook else "Reporting side",
                     "timestamp": message.created_at.astimezone(timezone.utc).isoformat(
                         timespec="seconds"
                     ),
-                    "content": combined[:2_000],
+                    "content": combined,
                 }
             )
-        return entries[-MAX_CONTEXT_MESSAGES:]
+        return entries
+
+    @staticmethod
+    def _split_transcript(text: str, max_bytes: int = REPORT_TRANSCRIPT_CHUNK_BYTES) -> list[bytes]:
+        """Split a transcript on line boundaries into valid UTF-8 Discord attachments."""
+        if max_bytes < 4:
+            raise ValueError("max_bytes must be at least 4")
+        chunks: list[bytes] = []
+        current = bytearray()
+        for line in text.splitlines(keepends=True):
+            encoded = line.encode("utf-8")
+            if len(encoded) > max_bytes:
+                if current:
+                    chunks.append(bytes(current))
+                    current.clear()
+                while encoded:
+                    boundary = min(max_bytes, len(encoded))
+                    while boundary > 0:
+                        try:
+                            encoded[:boundary].decode("utf-8")
+                            break
+                        except UnicodeDecodeError:
+                            boundary -= 1
+                    if boundary == 0:
+                        raise ValueError("unable to split transcript at a UTF-8 boundary")
+                    chunks.append(encoded[:boundary])
+                    encoded = encoded[boundary:]
+                continue
+            if current and len(current) + len(encoded) > max_bytes:
+                chunks.append(bytes(current))
+                current.clear()
+            current.extend(encoded)
+        if current or not chunks:
+            chunks.append(bytes(current))
+        return chunks
 
     @staticmethod
     def _get_recent_senders(entries: list[dict]) -> list[dict]:
@@ -435,6 +533,7 @@ class Report(commands.Cog):
         self,
         entries: list[dict],
         reported_guild_id: int,
+        reporting_guild_id: int,
         *,
         only_reported: bool = False,
         max_messages: int = 8,
@@ -453,11 +552,12 @@ class Report(commands.Cog):
         for entry in candidates[-max_messages:]:
             timestamp = str(entry.get("timestamp") or "")
             time_label = timestamp[11:19] if len(timestamp) >= 19 else "unknown"
-            side = (
-                "REPORTED"
-                if int(entry["guild_id"]) == int(reported_guild_id)
-                else "REPORTING"
-            )
+            if int(entry["guild_id"]) == int(reported_guild_id):
+                side = "REPORTED"
+            elif int(entry["guild_id"]) == int(reporting_guild_id):
+                side = "REPORTING"
+            else:
+                side = "OTHER"
             username = self._safe_report_text(entry.get("username") or "Unknown", 40)
             content = self._safe_report_text(entry.get("content"), 220)
             lines.append(f"`{time_label}` `{side}` **{username}:** {content}")
@@ -577,7 +677,11 @@ class Report(commands.Cog):
         )
 
         # Recent senders — filter out the reporter's own guild
-        other_senders = [s for s in senders if s["guild_id"] != guild.id]
+        other_senders = [
+            sender
+            for sender in senders
+            if int(sender["guild_id"]) == int(call["other_guild_id"])
+        ]
         if other_senders:
             sender_lines = []
             for sender in other_senders[:10]:
@@ -597,9 +701,9 @@ class Report(commands.Cog):
                 inline=False,
             )
 
-        transcript_file = None
+        transcript_parts: list[bytes] = []
         reported_excerpt = self._build_readable_excerpt(
-            list(raw_log), call["other_guild_id"], only_reported=True
+            list(raw_log), call["other_guild_id"], guild.id, only_reported=True
         )
         if reported_excerpt:
             log_embed.add_field(
@@ -609,7 +713,7 @@ class Report(commands.Cog):
             )
 
         context_excerpt = self._build_readable_excerpt(
-            list(raw_log), call["other_guild_id"]
+            list(raw_log), call["other_guild_id"], guild.id
         )
         if context_excerpt:
             log_embed.add_field(
@@ -625,26 +729,26 @@ class Report(commands.Cog):
                 f"Reason: {' '.join(reason.split())}\n"
                 f"Reported side: {reported_name} (server {call['other_guild_id']})\n"
                 f"Reporting side: {guild.name} (server {guild.id})\n"
-                "Legend: REPORTED = the side being reported; REPORTING = the side that filed it.\n"
+                "Legend: REPORTED = the selected side; REPORTING = the side that filed it; "
+                "OTHER ROOM STATION = another participant included for context.\n"
                 "=" * 72
             )
             transcript_lines = []
             for entry in captured:
-                side = (
-                    "REPORTED"
-                    if int(entry["guild_id"]) == int(call["other_guild_id"])
-                    else "REPORTING"
-                )
-                content = " ".join(str(entry.get("content") or "").split())
+                if int(entry["guild_id"]) == int(call["other_guild_id"]):
+                    side = "REPORTED"
+                elif int(entry["guild_id"]) == int(guild.id):
+                    side = "REPORTING"
+                else:
+                    side = "OTHER ROOM STATION"
+                content = str(entry.get("content") or "").replace("\r\n", "\n").replace("\r", "\n")
+                content = "\n  ".join(content.split("\n"))
                 sender_id = f" (user {entry['user_id']})" if entry.get("user_id") else ""
                 transcript_lines.append(
                     f"[{entry['timestamp']} UTC] [{side}] {entry['username']}{sender_id}:\n  {content}"
                 )
             transcript = f"{transcript_header}\n\n" + "\n\n".join(transcript_lines)
-            transcript_file = discord.File(
-                io.BytesIO(transcript.encode("utf-8")),
-                filename=f"report-{report_id}-excerpt.txt",
-            )
+            transcript_parts = self._split_transcript(transcript)
 
         if media_links:
             log_embed.add_field(
@@ -661,16 +765,43 @@ class Report(commands.Cog):
 
         log_embed.set_footer(
             text=(
-                f"Context was fetched only when this report was submitted | "
+                f"Full available context was fetched when this report was submitted | "
                 f"/resolvereport {report_id} to close"
             )
         )
 
+        evidence_message_ids: list[int] = []
+        total_parts = len(transcript_parts)
         try:
-            review_message = await log_ch.send(embed=log_embed, file=transcript_file)
-            await self.db.set_call_report_review_message(
-                report_id, review_message.id, review_message.channel.id
+            first_file = None
+            if transcript_parts:
+                first_file = discord.File(
+                    io.BytesIO(transcript_parts[0]),
+                    filename=(
+                        f"report-{report_id}-full-context.txt"
+                        if total_parts == 1
+                        else f"report-{report_id}-full-context-part-1-of-{total_parts}.txt"
+                    ),
+                )
+            review_message = await log_ch.send(embed=log_embed, file=first_file)
+            evidence_message_ids.append(review_message.id)
+            await self.db.set_call_report_review_messages(
+                report_id, review_message.channel.id, evidence_message_ids
             )
+
+            for index, part in enumerate(transcript_parts[1:], start=2):
+                continuation = await log_ch.send(
+                    content=f"Call report #{report_id} full context, part {index} of {total_parts}.",
+                    file=discord.File(
+                        io.BytesIO(part),
+                        filename=f"report-{report_id}-full-context-part-{index}-of-{total_parts}.txt",
+                    ),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                evidence_message_ids.append(continuation.id)
+                await self.db.set_call_report_review_messages(
+                    report_id, continuation.channel.id, evidence_message_ids
+                )
         except discord.HTTPException:
             pass
 
@@ -759,7 +890,7 @@ class Report(commands.Cog):
         )
         embed.add_field(
             name="Evidence",
-            value="Open the original private report message to view its on-demand context attachment.",
+            value="Open the original private report message to view its full context attachment parts.",
             inline=False,
         )
         embed.set_footer(text="Use Resolve to close this report, or choose another report above.")

@@ -10,7 +10,7 @@ Fliphone processes ordinary server messages only after confirming that the messa
 
 All public controls and restricted moderation tools use Discord application commands. Restricted tools also verify the caller against the bot owner and trusted moderator user ID list. Fliphone does not use Message Content for command parsing.
 
-Ordinary conversation text is not stored in PostgreSQL, SQLite, logs, or backups. When a user submits `/report`, Fliphone fetches limited recent context from the reporting Discord channel, posts no more than 50 relevant messages to a private Discord moderation channel, and discards that context locally. The private evidence message is scheduled for deletion when resolved or after 30 days. The database stores only report metadata and the written reason submitted through the report interaction.
+Ordinary conversation text is not stored in PostgreSQL, SQLite, logs, or backups. When a user submits `/report`, Fliphone fetches the full eligible conversation window for the selected call or room from the reporting Discord channel, posts it as one or more text attachments in a private Discord moderation channel, and discards that context locally. The private evidence messages are scheduled for deletion when resolved or after 30 days. The database stores only report metadata, Discord evidence message IDs, and the written reason submitted through the report interaction.
 
 Users can run `/privacy optout` at any time. Their future messages are ignored before content processing and are excluded from new report context. They can use `/privacy optin` to participate again.
 
@@ -40,7 +40,7 @@ Users run `/privacy optout`. Fliphone then ignores their future messages before 
 
 Select **No** for ordinary server message content obtained through Message Content Intent.
 
-Fliphone does not store ordinary conversation text in PostgreSQL, SQLite, logs, or backups. Limited report context is posted to a private Discord moderation channel and discarded locally. The database stores report metadata and the report reason entered through a Discord interaction, not a stored conversation transcript.
+Fliphone does not store ordinary conversation text in PostgreSQL, SQLite, logs, or backups. On demand report context is posted to a private Discord moderation channel and discarded locally. The database stores report metadata, Discord evidence message IDs, and the report reason entered through a Discord interaction, not a stored conversation transcript.
 
 ## Is Message Content Used for AI Training
 
@@ -84,7 +84,7 @@ Replace these placeholders before submission.
 
 6. Run `/privacy optout`, start a conversation from another participating user, and show that the opted out user's message is not relayed.
 
-7. Run `/report`, show the private report confirmation, and show the private moderator report with limited context. Hide private server names, user IDs, webhook URLs, tokens, and unrelated report content before publishing the video.
+7. Run `/report`, show the private report confirmation, and show the private moderator report with its full context attachment. Hide private server names, user IDs, webhook URLs, tokens, and unrelated report content before publishing the video.
 
 8. Show `/sudohelp` from a trusted moderator account and show an unauthorized account being denied access to a restricted command.
 

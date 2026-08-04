@@ -54,11 +54,11 @@ Production records are stored in managed PostgreSQL hosted through Railway. SQLi
 
 Users may submit a conversation report with `/report`. The report form collects a written reason and may collect a voluntarily supplied media link.
 
-When a report is submitted, Fliphone identifies the active or most recent relevant conversation and fetches recent context from the reporting Discord channel. Fliphone includes no more than 50 relevant messages from the selected conversation. Messages from users who enabled `/privacy optout` and messages beginning with `x ` are excluded.
+When a report is submitted, Fliphone identifies the active or most recent relevant conversation and fetches the full available conversation window from the reporting Discord channel. This may include message text, attachment links, stickers, embeds, and reaction summaries from the selected call or room. Messages from users who enabled `/privacy optout`, messages beginning with `x `, and unrelated bot messages are excluded.
 
-The fetched context exists in application memory only while the report is assembled. It is sent to a private Discord moderation channel as a readable review message and, when context is available, a text attachment. It is then discarded from Fliphone's local memory.
+The fetched context exists in application memory only while the report is assembled. It is sent to a private Discord moderation channel as a readable review message and, when context is available, one or more text attachments. It is then discarded from Fliphone's local memory.
 
-Ordinary conversation context is not stored in PostgreSQL, SQLite, application logs, or backup files. The private Discord report message is scheduled for deletion when the report is resolved or after 30 days, whichever occurs first.
+Ordinary conversation context is not stored in PostgreSQL, SQLite, application logs, or backup files. The private Discord report evidence messages are scheduled for deletion when the report is resolved or after 30 days, whichever occurs first.
 
 The database stores report metadata, including the reporter user and server IDs, the reported server ID, the written report reason, call timestamps, report status, private review message ID, and private review channel ID. This metadata allows authorized moderators to manage the report and remove its Discord evidence.
 

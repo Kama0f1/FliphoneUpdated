@@ -12,7 +12,9 @@
 
 * `/privacy optout` prevents your future messages from being relayed or included in new report context. `/privacy optin` enables participation again.
 
-* Reports no longer depend on a stored conversation buffer. When `/report` is submitted, Fliphone fetches limited context from Discord, sends up to 50 relevant messages to the private moderation channel, and discards the context locally.
+* Reports no longer depend on a stored conversation buffer. When `/report` is submitted, Fliphone fetches the full available context for that call or room from Discord, sends it to the private moderation channel, and discards the context locally.
+
+* Long report transcripts are automatically split into multiple Discord attachments so moderators do not lose the beginning of busy conversations.
 
 * Private report evidence is scheduled for deletion when the report is resolved or after 30 days.
 
