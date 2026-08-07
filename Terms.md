@@ -104,7 +104,7 @@ Administrators may use `/setup`, `/check`, `/repair`, `/kick`, `/block`, and `/t
 
 ## 10. Restricted Staff Tools
 
-Restricted moderation tools use Discord slash commands. Fliphone checks the caller's Discord user ID against the bot owner and trusted moderator list before allowing access.
+Restricted moderation tools are available through slash commands and supported `f.` prefix commands. Fliphone checks the caller's Discord user ID against the bot owner and trusted moderator list before allowing access.
 
 The presence of a restricted command in Discord's command picker does not grant permission to use it. Attempts by unauthorized users are rejected.
 

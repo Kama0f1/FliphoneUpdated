@@ -2,7 +2,9 @@
 
 ## August 2026 Privacy And Commands Update
 
-* Fliphone now uses slash commands for all public controls, setup tools, reports, and restricted moderation tools.
+* Slash commands are Fliphone's main controls, and `f.` prefix commands are available again for members who prefer them.
+
+* Fliphone's status now explains that the service is rebuilding after database loss and apologizes for the disruption.
 
 * Restricted moderation commands check the caller against the trusted staff user ID list. Unauthorized users cannot use the commands or their review panels.
 

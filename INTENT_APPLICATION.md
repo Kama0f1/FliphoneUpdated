@@ -8,7 +8,7 @@ Fliphone is a voluntary real time cross server conversation bot. A server admini
 
 Fliphone processes ordinary server messages only after confirming that the message was sent in an administrator configured Fliphone channel during an active call or room. It applies safety filters, link and attachment rules, GIF and custom emoji rules, and rate limits. Permitted content is delivered to participating channels through Discord webhooks. Messages in unrelated channels and messages outside active conversations are ignored before content is inspected.
 
-All public controls and restricted moderation tools use Discord application commands. Restricted tools also verify the caller against the bot owner and trusted moderator user ID list. Fliphone does not use Message Content for command parsing.
+Slash commands are Fliphone's primary control surface. Members may also use the `f.` prefix or mention Fliphone for supported command shortcuts. Restricted tools verify the caller against the bot owner and trusted moderator user ID list. Message Content is required primarily for the active conversational relay, not for commands.
 
 Ordinary conversation text is not stored in PostgreSQL, SQLite, logs, or backups. When a user submits `/report`, Fliphone fetches the full eligible conversation window for the selected call or room from the reporting Discord channel, posts it as one or more text attachments in a private Discord moderation channel, and discards that context locally. The private evidence messages are scheduled for deletion when resolved or after 30 days. The database stores only report metadata, Discord evidence message IDs, and the written reason submitted through the report interaction.
 

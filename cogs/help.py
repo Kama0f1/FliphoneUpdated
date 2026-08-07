@@ -201,7 +201,7 @@ class Help(commands.Cog):
     @commands.hybrid_command(name="help", aliases=["commands", "cmds"])
     async def help(self, ctx: commands.Context, *, command: Optional[str] = None) -> None:
         if command:
-            key = command.strip().lower().removeprefix("/")
+            key = command.strip().lower().removeprefix("/").removeprefix("f.")
             key = PUBLIC_ALIASES.get(key, key)
             entry = ALL_PUBLIC.get(key)
             if not entry:

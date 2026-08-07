@@ -207,6 +207,7 @@ DISCORD_TOKEN=your_bot_token_here
 
 # Optional
 DATABASE_URL=                  # PostgreSQL URL. If empty, SQLite is used.
+SERVICE_STATUS_MESSAGE=        # Temporary Discord presence text. Leave blank for normal status.
 DB_PATH=phonebooth.db          # SQLite file path for fallback/migration
 DATABASE_POOL_SIZE=5           # PostgreSQL connection pool size
 PG_STATEMENT_CACHE_SIZE=0      # Keep 0 for managed DB pooler compatibility

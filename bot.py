@@ -105,10 +105,9 @@ class PhoneboothBot(commands.AutoShardedBot):
         shard_count = config.SHARD_COUNT if getattr(config, "SHARD_COUNT", 0) else None
 
         super().__init__(
-            # Mention commands remain available for restricted maintenance and do
-            # not require privileged Message Content access. Public controls use /
-            # commands; ordinary messages are reserved for active relay channels.
-            command_prefix=commands.when_mentioned,
+            # Slash commands are the primary interface, while f. and mentions
+            # remain available for members who prefer command prefixes.
+            command_prefix=commands.when_mentioned_or("f."),
             intents=intents,
             help_command=None,
             case_insensitive=True,
@@ -171,7 +170,12 @@ class PhoneboothBot(commands.AutoShardedBot):
     # ── Presence ──────────────────────────────────────────────────────────────
 
     async def _update_presence(self) -> None:
-        if config.SHUTDOWN_NOTICE_ENABLED:
+        if config.SERVICE_STATUS_MESSAGE:
+            activity = discord.Activity(
+                type=discord.ActivityType.watching,
+                name=config.SERVICE_STATUS_MESSAGE[:128],
+            )
+        elif config.SHUTDOWN_NOTICE_ENABLED:
             activity = discord.Activity(
                 type=discord.ActivityType.watching,
                 name=f"Shutting down {config.shutdown_date_label()}",

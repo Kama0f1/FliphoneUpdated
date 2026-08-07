@@ -34,6 +34,10 @@ SHUTDOWN_NOTICE_ENABLED: bool = os.getenv("SHUTDOWN_NOTICE_ENABLED", "0").strip(
     "off",
 }
 SHUTDOWN_DATE: str = os.getenv("SHUTDOWN_DATE", "2026-08-20")
+SERVICE_STATUS_MESSAGE: str = os.getenv(
+    "SERVICE_STATUS_MESSAGE",
+    "Rebuilding after database loss. Sorry for the trouble.",
+).strip()
 
 
 def shutdown_date_label() -> str:
