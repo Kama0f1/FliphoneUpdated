@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import io
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -29,7 +30,7 @@ import discord
 from discord.ext import commands, tasks
 
 import config
-from access_control import trusted_moderator_only
+from access_control import is_trusted_moderator, trusted_moderator_only
 from database import Database
 from relay_policy import is_local_only
 
@@ -38,6 +39,7 @@ REPORT_LOG_CHANNEL_ID = int(os.getenv("USER_REPORT_LOG_CHANNEL_ID", 149720591508
 
 REPORT_TRANSCRIPT_CHUNK_BYTES = 7_500_000
 REPORT_EVIDENCE_RETENTION_DAYS = 30
+REPORT_VIEWER_PAGE_SIZE = 5
 
 
 # ── Report Modal (slash command) ──────────────────────────────────────────────
@@ -204,12 +206,133 @@ class UserReportPanelView(discord.ui.View):
         await self._refresh(interaction)
 
 
+class ReportConversationButton(discord.ui.Button):
+    def __init__(self, cog: "Report", report_id: int) -> None:
+        super().__init__(
+            label="Open Conversation",
+            style=discord.ButtonStyle.primary,
+            custom_id=f"report:conversation:{report_id}",
+        )
+        self.cog = cog
+        self.report_id = report_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.cog._open_conversation_viewer(interaction, self.report_id)
+
+
+class ReportConversationLaunchView(discord.ui.View):
+    def __init__(self, cog: "Report", report_id: int) -> None:
+        super().__init__(timeout=None)
+        self.add_item(ReportConversationButton(cog, report_id))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if await is_trusted_moderator(interaction.client, interaction.user):
+            return True
+        await interaction.response.send_message(
+            "You do not have permission to view report evidence.",
+            ephemeral=True,
+        )
+        return False
+
+
+class ReportConversationPager(discord.ui.View):
+    def __init__(self, cog: "Report", report_id: int, entries: list[dict], user_id: int) -> None:
+        super().__init__(timeout=900)
+        self.cog = cog
+        self.report_id = report_id
+        self.entries = entries
+        self.user_id = user_id
+        self.pages = self._paginate(entries)
+        self.page = 0
+        self.page_count = len(self.pages)
+        self._update_buttons()
+
+    @staticmethod
+    def _paginate(entries: list[dict]) -> list[list[tuple[int, dict]]]:
+        pages: list[list[tuple[int, dict]]] = []
+        current: list[tuple[int, dict]] = []
+        current_chars = 0
+        for position, entry in enumerate(entries, start=1):
+            estimated_chars = min(len(str(entry.get("content") or "")), 3_900) + 250
+            if current and (
+                len(current) >= REPORT_VIEWER_PAGE_SIZE
+                or current_chars + estimated_chars > 5_500
+            ):
+                pages.append(current)
+                current = []
+                current_chars = 0
+            current.append((position, entry))
+            current_chars += estimated_chars
+        if current:
+            pages.append(current)
+        return pages or [[]]
+
+    def _update_buttons(self) -> None:
+        self.previous.disabled = self.page <= 0
+        self.next.disabled = self.page >= self.page_count - 1
+
+    def render(self) -> tuple[str, list[discord.Embed]]:
+        page_entries = self.pages[self.page]
+        embeds = [
+            self.cog._build_conversation_message_embed(
+                entry,
+                report_id=self.report_id,
+                position=position,
+                total=len(self.entries),
+            )
+            for position, entry in page_entries
+        ]
+        return (
+            f"**Report #{self.report_id} conversation** | "
+            f"Page {self.page + 1}/{self.page_count} | {len(self.entries)} messages",
+            embeds,
+        )
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.user_id:
+            return True
+        await interaction.response.send_message(
+            "This private conversation viewer belongs to another moderator.",
+            ephemeral=True,
+        )
+        return False
+
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary)
+    async def previous(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        self.page -= 1
+        self._update_buttons()
+        content, embeds = self.render()
+        await interaction.response.edit_message(content=content, embeds=embeds, view=self)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary)
+    async def next(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        self.page += 1
+        self._update_buttons()
+        content, embeds = self.render()
+        await interaction.response.edit_message(content=content, embeds=embeds, view=self)
+
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.danger)
+    async def close(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.edit_message(
+            content="Conversation viewer closed.",
+            embeds=[],
+            view=None,
+        )
+
+
 class Report(commands.Cog):
     def __init__(self, bot) -> None:
         self.bot = bot
         self.db: Database = bot.db
 
     async def cog_load(self) -> None:
+        for report in await self.db.get_open_call_reports():
+            message_id = report.get("review_msg_id")
+            if message_id:
+                self.bot.add_view(
+                    ReportConversationLaunchView(self, int(report["id"])),
+                    message_id=int(message_id),
+                )
         self._cleanup_expired_reports.start()
 
     def cog_unload(self) -> None:
@@ -437,6 +560,8 @@ class Report(commands.Cog):
                 continue
 
             username = str(getattr(message.author, "display_name", message.author))
+            display_avatar = getattr(message.author, "display_avatar", None)
+            avatar_url = str(getattr(display_avatar, "url", "") or "")
             webhook_guild_id = int(call["other_guild_id"])
             webhook_guild_name = "Relayed side"
             station_guild_ids = call.get("station_guild_ids") or {}
@@ -455,6 +580,7 @@ class Report(commands.Cog):
                         else int(reporting_guild_id)
                     ),
                     "guild_name": webhook_guild_name if is_webhook else "Reporting side",
+                    "avatar_url": avatar_url,
                     "timestamp": message.created_at.astimezone(timezone.utc).isoformat(
                         timespec="seconds"
                     ),
@@ -496,6 +622,187 @@ class Report(commands.Cog):
         if current or not chunks:
             chunks.append(bytes(current))
         return chunks
+
+    @staticmethod
+    def _entry_side(entry: dict, reported_guild_id: int, reporting_guild_id: int) -> str:
+        if int(entry["guild_id"]) == int(reported_guild_id):
+            return "REPORTED"
+        if int(entry["guild_id"]) == int(reporting_guild_id):
+            return "REPORTING"
+        return "OTHER ROOM STATION"
+
+    def _build_transcript(
+        self,
+        *,
+        report_id: int,
+        reason: str,
+        reported_name: str,
+        reported_guild_id: int,
+        reporting_name: str,
+        reporting_guild_id: int,
+        entries: list[dict],
+    ) -> str:
+        header = (
+            f"FLIPHONE CALL REPORT #{report_id}\n"
+            f"Reason: {' '.join(reason.split())}\n"
+            f"Reported side: {reported_name} (server {reported_guild_id})\n"
+            f"Reporting side: {reporting_name} (server {reporting_guild_id})\n"
+            "Legend: REPORTED = the selected side; REPORTING = the side that filed it; "
+            "OTHER ROOM STATION = another participant included for context.\n"
+            + ("=" * 72)
+        )
+        blocks: list[str] = []
+        for index, entry in enumerate(entries, start=1):
+            username = " ".join(str(entry.get("username") or "Unknown").split())
+            user_id = str(entry.get("user_id") or "unavailable")
+            avatar_url = str(entry.get("avatar_url") or "none").replace("\n", " ")
+            timestamp = str(entry.get("timestamp") or "unknown").replace("\n", " ")
+            content = str(entry.get("content") or "").replace("\r\n", "\n").replace("\r", "\n")
+            blocks.append(
+                f"----- FLIPHONE MESSAGE {index:06d} -----\n"
+                f"Time: {timestamp} UTC\n"
+                f"Side: {self._entry_side(entry, reported_guild_id, reporting_guild_id)}\n"
+                f"Speaker: {username}\n"
+                f"User ID: {user_id}\n"
+                f"Avatar URL: {avatar_url}\n"
+                f"Message Length: {len(content)}\n"
+                f"Message:\n{content}"
+            )
+        return f"{header}\n\n" + "\n\n".join(blocks)
+
+    @staticmethod
+    def _parse_transcript(text: str) -> list[dict]:
+        marker = re.compile(r"^----- FLIPHONE MESSAGE \d+ -----$", re.MULTILINE)
+        entries: list[dict] = []
+        cursor = 0
+        while match := marker.search(text, cursor):
+            metadata_start = match.end()
+            message_separator = text.find("\nMessage:\n", metadata_start)
+            if message_separator < 0:
+                break
+            metadata = text[metadata_start:message_separator].strip("\n")
+            values: dict[str, str] = {}
+            for line in metadata.splitlines():
+                key, found, value = line.partition(": ")
+                if found:
+                    values[key] = value
+            content_start = message_separator + len("\nMessage:\n")
+            try:
+                content_length = int(values.get("Message Length", ""))
+            except ValueError:
+                next_match = marker.search(text, content_start)
+                content_end = next_match.start() if next_match else len(text)
+            else:
+                content_end = min(len(text), content_start + max(0, content_length))
+            content = text[content_start:content_end]
+            entries.append(
+                {
+                    "timestamp": values.get("Time", "unknown").removesuffix(" UTC"),
+                    "side": values.get("Side", "OTHER"),
+                    "username": values.get("Speaker", "Unknown"),
+                    "user_id": None if values.get("User ID") == "unavailable" else values.get("User ID"),
+                    "avatar_url": "" if values.get("Avatar URL") == "none" else values.get("Avatar URL", ""),
+                    "content": content,
+                }
+            )
+            cursor = max(content_end, match.end())
+        return entries
+
+    @staticmethod
+    def _report_message_ids(report: dict) -> list[int]:
+        message_ids: list[int] = []
+        for value in str(report.get("review_message_ids") or "").split(","):
+            try:
+                message_ids.append(int(value.strip()))
+            except (TypeError, ValueError):
+                continue
+        legacy_id = report.get("review_msg_id")
+        if legacy_id and int(legacy_id) not in message_ids:
+            message_ids.insert(0, int(legacy_id))
+        return message_ids
+
+    async def _load_report_transcript(self, report: dict) -> list[dict]:
+        channel_id = report.get("review_channel_id")
+        if not channel_id:
+            return []
+        channel = self.bot.get_channel(int(channel_id))
+        if channel is None:
+            channel = await self.bot.fetch_channel(int(channel_id))
+
+        report_id = int(report["id"])
+        transcript_parts: list[bytes] = []
+        for message_id in self._report_message_ids(report):
+            try:
+                message = await channel.fetch_message(message_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError):
+                continue
+            for attachment in message.attachments:
+                if not (
+                    attachment.filename.startswith(f"report-{report_id}-full-context")
+                    and attachment.filename.endswith(".txt")
+                ):
+                    continue
+                try:
+                    transcript_parts.append(await attachment.read(use_cached=True))
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    continue
+        if not transcript_parts:
+            return []
+        return self._parse_transcript(b"".join(transcript_parts).decode("utf-8", errors="replace"))
+
+    def _build_conversation_message_embed(
+        self,
+        entry: dict,
+        *,
+        report_id: int,
+        position: int,
+        total: int,
+    ) -> discord.Embed:
+        username = self._safe_report_text(entry.get("username") or "Unknown", 120)
+        side = self._safe_report_text(entry.get("side") or "OTHER", 40).title()
+        content = discord.utils.escape_mentions(str(entry.get("content") or "No message content."))
+        if len(content) > 3_900:
+            content = f"{content[:3_897]}..."
+        embed = discord.Embed(description=content, color=config.COLOR_WAIT)
+        avatar_url = str(entry.get("avatar_url") or "")
+        author_kwargs = {"name": f"{side} | {username}"}
+        if avatar_url.startswith(("https://", "http://")):
+            author_kwargs["icon_url"] = avatar_url
+        embed.set_author(**author_kwargs)
+        embed.set_footer(
+            text=(
+                f"{self._format_report_time(entry.get('timestamp'))} | "
+                f"Message {position}/{total} | Report #{report_id}"
+            )
+        )
+        return embed
+
+    async def _open_conversation_viewer(
+        self,
+        interaction: discord.Interaction,
+        report_id: int,
+    ) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        report = await self.db.get_call_report(report_id)
+        if not report or report.get("status") != "open":
+            await interaction.edit_original_response(
+                content="This report is no longer open.",
+                view=None,
+            )
+            return
+        try:
+            entries = await self._load_report_transcript(report)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError):
+            entries = []
+        if not entries:
+            await interaction.edit_original_response(
+                content="No readable conversation context is available for this report.",
+                view=None,
+            )
+            return
+        viewer = ReportConversationPager(self, report_id, entries, interaction.user.id)
+        content, embeds = viewer.render()
+        await interaction.edit_original_response(content=content, embeds=embeds, view=viewer)
 
     @staticmethod
     def _get_recent_senders(entries: list[dict]) -> list[dict]:
@@ -548,7 +855,7 @@ class Report(commands.Cog):
                 or int(entry["guild_id"]) == int(reported_guild_id)
             )
         ]
-        lines: list[str] = []
+        blocks: list[str] = []
         for entry in candidates[-max_messages:]:
             timestamp = str(entry.get("timestamp") or "")
             time_label = timestamp[11:19] if len(timestamp) >= 19 else "unknown"
@@ -560,13 +867,16 @@ class Report(commands.Cog):
                 side = "OTHER"
             username = self._safe_report_text(entry.get("username") or "Unknown", 40)
             content = self._safe_report_text(entry.get("content"), 220)
-            lines.append(f"`{time_label}` `{side}` **{username}:** {content}")
+            blocks.append(
+                f"**{username}** | `{side}` | `{time_label}`\n"
+                f"> {content}"
+            )
 
-        while len("\n".join(lines)) > max_chars and len(lines) > 1:
-            lines.pop(0)
-        if lines and len(lines[0]) > max_chars:
-            lines[0] = f"{lines[0][: max_chars - 3]}..."
-        return "\n".join(lines)
+        while len("\n\n".join(blocks)) > max_chars and len(blocks) > 1:
+            blocks.pop(0)
+        if blocks and len(blocks[0]) > max_chars:
+            blocks[0] = f"{blocks[0][: max_chars - 3]}..."
+        return "\n\n".join(blocks)
 
     # ── Core report logic ─────────────────────────────────────────────────────
 
@@ -724,30 +1034,15 @@ class Report(commands.Cog):
 
         captured = [entry for entry in raw_log if entry.get("content")]
         if captured:
-            transcript_header = (
-                f"FLIPHONE CALL REPORT #{report_id}\n"
-                f"Reason: {' '.join(reason.split())}\n"
-                f"Reported side: {reported_name} (server {call['other_guild_id']})\n"
-                f"Reporting side: {guild.name} (server {guild.id})\n"
-                "Legend: REPORTED = the selected side; REPORTING = the side that filed it; "
-                "OTHER ROOM STATION = another participant included for context.\n"
-                "=" * 72
+            transcript = self._build_transcript(
+                report_id=report_id,
+                reason=reason,
+                reported_name=reported_name,
+                reported_guild_id=int(call["other_guild_id"]),
+                reporting_name=guild.name,
+                reporting_guild_id=guild.id,
+                entries=captured,
             )
-            transcript_lines = []
-            for entry in captured:
-                if int(entry["guild_id"]) == int(call["other_guild_id"]):
-                    side = "REPORTED"
-                elif int(entry["guild_id"]) == int(guild.id):
-                    side = "REPORTING"
-                else:
-                    side = "OTHER ROOM STATION"
-                content = str(entry.get("content") or "").replace("\r\n", "\n").replace("\r", "\n")
-                content = "\n  ".join(content.split("\n"))
-                sender_id = f" (user {entry['user_id']})" if entry.get("user_id") else ""
-                transcript_lines.append(
-                    f"[{entry['timestamp']} UTC] [{side}] {entry['username']}{sender_id}:\n  {content}"
-                )
-            transcript = f"{transcript_header}\n\n" + "\n\n".join(transcript_lines)
             transcript_parts = self._split_transcript(transcript)
 
         if media_links:
@@ -783,7 +1078,11 @@ class Report(commands.Cog):
                         else f"report-{report_id}-full-context-part-1-of-{total_parts}.txt"
                     ),
                 )
-            review_message = await log_ch.send(embed=log_embed, file=first_file)
+            review_message = await log_ch.send(
+                embed=log_embed,
+                file=first_file,
+                view=ReportConversationLaunchView(self, report_id),
+            )
             evidence_message_ids.append(review_message.id)
             await self.db.set_call_report_review_messages(
                 report_id, review_message.channel.id, evidence_message_ids

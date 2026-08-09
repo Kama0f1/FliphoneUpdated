@@ -18,6 +18,10 @@
 
 * Long report transcripts are automatically split into multiple Discord attachments so moderators do not lose the beginning of busy conversations.
 
+* Report previews are easier to scan, with each speaker, side, timestamp, and message shown as a separate conversation block.
+
+* New reports include an Open Conversation button for trusted moderators. It opens the full conversation privately with page controls and shows each speaker's profile picture when Discord provides one.
+
 * Private report evidence is scheduled for deletion when the report is resolved or after 30 days.
 
 * GIF and custom emoji submissions now use slash command fields. `/addemoji` and `/addemojis` both accept up to five custom emojis at once.

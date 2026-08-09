@@ -61,6 +61,7 @@ def _message(
         id=user_id,
         bot=bot,
         display_name=display_name or f"user-{user_id}",
+        display_avatar=SimpleNamespace(url=f"https://cdn.example/avatar-{user_id}.png"),
         __str__=lambda self: self.display_name,
     )
     return SimpleNamespace(
@@ -107,6 +108,7 @@ class ReportContextTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([entry["content"] for entry in entries], ["local message", "relayed message"])
         self.assertEqual([entry["guild_id"] for entry in entries], [1, 2])
+        self.assertEqual(entries[0]["avatar_url"], "https://cdn.example/avatar-10.png")
 
     async def test_context_fetches_every_message_in_the_call_window(self):
         messages = [_message(index, 10, f"message {index}") for index in range(1, 151)]
@@ -168,6 +170,72 @@ class ReportContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(len(chunks), 1)
         self.assertTrue(all(len(chunk) <= 64 for chunk in chunks))
         self.assertEqual(b"".join(chunks).decode("utf-8"), transcript)
+
+    def test_readable_transcript_has_one_header_and_round_trips_messages(self):
+        bot = SimpleNamespace(db=_PrivacyDatabase(set()))
+        report = Report(bot)
+        transcript = report._build_transcript(
+            report_id=7,
+            reason="A test report",
+            reported_name="Reported Server",
+            reported_guild_id=2,
+            reporting_name="Reporting Server",
+            reporting_guild_id=1,
+            entries=[
+                {
+                    "guild_id": 2,
+                    "username": "First Speaker",
+                    "user_id": None,
+                    "avatar_url": "https://cdn.example/first.png",
+                    "timestamp": "2026-08-04T12:00:01+00:00",
+                    "content": (
+                        "first line\n"
+                        "----- FLIPHONE MESSAGE 999999 -----\n"
+                        "second line"
+                    ),
+                },
+                {
+                    "guild_id": 1,
+                    "username": "Second Speaker",
+                    "user_id": 22,
+                    "avatar_url": "https://cdn.example/second.png",
+                    "timestamp": "2026-08-04T12:00:02+00:00",
+                    "content": "reply",
+                },
+            ],
+        )
+
+        self.assertEqual(transcript.count("FLIPHONE CALL REPORT #7"), 1)
+        parsed = report._parse_transcript(transcript)
+        self.assertEqual(len(parsed), 2)
+        self.assertEqual(parsed[0]["side"], "REPORTED")
+        self.assertEqual(
+            parsed[0]["content"],
+            "first line\n----- FLIPHONE MESSAGE 999999 -----\nsecond line",
+        )
+        self.assertEqual(parsed[0]["avatar_url"], "https://cdn.example/first.png")
+        self.assertEqual(parsed[1]["side"], "REPORTING")
+        self.assertEqual(parsed[1]["user_id"], "22")
+
+    def test_report_excerpt_uses_readable_message_blocks(self):
+        report = Report(SimpleNamespace(db=_PrivacyDatabase(set())))
+        excerpt = report._build_readable_excerpt(
+            [
+                {
+                    "guild_id": 2,
+                    "username": "Speaker",
+                    "timestamp": "2026-08-04T12:00:01+00:00",
+                    "content": "A readable message",
+                }
+            ],
+            reported_guild_id=2,
+            reporting_guild_id=1,
+        )
+
+        self.assertEqual(
+            excerpt,
+            "**Speaker** | `REPORTED` | `12:00:01`\n> A readable message",
+        )
 
     async def test_deleting_report_removes_every_evidence_part(self):
         channel = _EvidenceChannel()
