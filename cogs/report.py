@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
+import logging
 import os
 import re
 from datetime import datetime, timedelta, timezone
@@ -40,6 +42,8 @@ REPORT_LOG_CHANNEL_ID = int(os.getenv("USER_REPORT_LOG_CHANNEL_ID", 149720591508
 REPORT_TRANSCRIPT_CHUNK_BYTES = 7_500_000
 REPORT_EVIDENCE_RETENTION_DAYS = 30
 REPORT_VIEWER_PAGE_SIZE = 5
+
+log = logging.getLogger("fliphone")
 
 
 # ── Report Modal (slash command) ──────────────────────────────────────────────
@@ -655,7 +659,6 @@ class Report(commands.Cog):
         for index, entry in enumerate(entries, start=1):
             username = " ".join(str(entry.get("username") or "Unknown").split())
             user_id = str(entry.get("user_id") or "unavailable")
-            avatar_url = str(entry.get("avatar_url") or "none").replace("\n", " ")
             timestamp = str(entry.get("timestamp") or "unknown").replace("\n", " ")
             content = str(entry.get("content") or "").replace("\r\n", "\n").replace("\r", "\n")
             blocks.append(
@@ -664,11 +667,50 @@ class Report(commands.Cog):
                 f"Side: {self._entry_side(entry, reported_guild_id, reporting_guild_id)}\n"
                 f"Speaker: {username}\n"
                 f"User ID: {user_id}\n"
-                f"Avatar URL: {avatar_url}\n"
                 f"Message Length: {len(content)}\n"
                 f"Message:\n{content}"
             )
         return f"{header}\n\n" + "\n\n".join(blocks)
+
+    def _build_viewer_data(
+        self,
+        entries: list[dict],
+        reported_guild_id: int,
+        reporting_guild_id: int,
+    ) -> str:
+        lines: list[str] = []
+        for entry in entries:
+            lines.append(
+                json.dumps(
+                    {
+                        "timestamp": str(entry.get("timestamp") or "unknown"),
+                        "side": self._entry_side(
+                            entry,
+                            reported_guild_id,
+                            reporting_guild_id,
+                        ),
+                        "username": str(entry.get("username") or "Unknown"),
+                        "user_id": entry.get("user_id"),
+                        "avatar_url": str(entry.get("avatar_url") or ""),
+                        "content": str(entry.get("content") or ""),
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _parse_viewer_data(text: str) -> list[dict]:
+        entries: list[dict] = []
+        for line in text.splitlines():
+            try:
+                entry = json.loads(line)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(entry, dict) and entry.get("content"):
+                entries.append(entry)
+        return entries
 
     @staticmethod
     def _parse_transcript(text: str) -> list[dict]:
@@ -731,21 +773,45 @@ class Report(commands.Cog):
 
         report_id = int(report["id"])
         transcript_parts: list[bytes] = []
+        viewer_data_parts: list[bytes] = []
         for message_id in self._report_message_ids(report):
             try:
                 message = await channel.fetch_message(message_id)
             except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError):
                 continue
             for attachment in message.attachments:
-                if not (
-                    attachment.filename.startswith(f"report-{report_id}-full-context")
-                    and attachment.filename.endswith(".txt")
-                ):
+                filename = attachment.filename.removeprefix("SPOILER_")
+                is_transcript = (
+                    filename.startswith(f"report-{report_id}-full-context")
+                    and filename.endswith(".txt")
+                )
+                is_viewer_data = (
+                    filename.startswith(f"report-{report_id}-viewer-data")
+                    and filename.endswith(".jsonl")
+                )
+                if not is_transcript and not is_viewer_data:
                     continue
                 try:
-                    transcript_parts.append(await attachment.read(use_cached=True))
+                    data = await attachment.read()
                 except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                    continue
+                    try:
+                        data = await attachment.read(use_cached=True)
+                    except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
+                        log.warning(
+                            "Report viewer could not download attachment | report=%s | file=%s | error=%s",
+                            report_id,
+                            attachment.filename,
+                            exc,
+                        )
+                        continue
+                if is_viewer_data:
+                    viewer_data_parts.append(data)
+                else:
+                    transcript_parts.append(data)
+        if viewer_data_parts:
+            return self._parse_viewer_data(
+                b"".join(viewer_data_parts).decode("utf-8", errors="replace")
+            )
         if not transcript_parts:
             return []
         return self._parse_transcript(b"".join(transcript_parts).decode("utf-8", errors="replace"))
@@ -1011,7 +1077,20 @@ class Report(commands.Cog):
                 inline=False,
             )
 
+        captured = [entry for entry in raw_log if entry.get("content")]
         transcript_parts: list[bytes] = []
+        viewer_data_parts: list[bytes] = []
+        if captured:
+            capture_end = self._format_report_time(captured[-1].get("timestamp"))
+            log_embed.add_field(
+                name="Conversation Capture",
+                value=(
+                    f"**{len(captured)} messages** captured from the start of this call "
+                    f"through **{capture_end}**. The sections below are short previews; "
+                    "use **Open Conversation** or the attached transcript for the full capture."
+                ),
+                inline=False,
+            )
         reported_excerpt = self._build_readable_excerpt(
             list(raw_log), call["other_guild_id"], guild.id, only_reported=True
         )
@@ -1032,7 +1111,6 @@ class Report(commands.Cog):
                 inline=False,
             )
 
-        captured = [entry for entry in raw_log if entry.get("content")]
         if captured:
             transcript = self._build_transcript(
                 report_id=report_id,
@@ -1044,6 +1122,12 @@ class Report(commands.Cog):
                 entries=captured,
             )
             transcript_parts = self._split_transcript(transcript)
+            viewer_data = self._build_viewer_data(
+                captured,
+                int(call["other_guild_id"]),
+                guild.id,
+            )
+            viewer_data_parts = self._split_transcript(viewer_data)
 
         if media_links:
             log_embed.add_field(
@@ -1066,43 +1150,63 @@ class Report(commands.Cog):
         )
 
         evidence_message_ids: list[int] = []
-        total_parts = len(transcript_parts)
+        total_parts = max(len(transcript_parts), len(viewer_data_parts))
         try:
-            first_file = None
-            if transcript_parts:
-                first_file = discord.File(
-                    io.BytesIO(transcript_parts[0]),
-                    filename=(
+            for part_index in range(total_parts or 1):
+                index = part_index + 1
+                files: list[discord.File] = []
+                if part_index < len(transcript_parts):
+                    transcript_name = (
                         f"report-{report_id}-full-context.txt"
-                        if total_parts == 1
-                        else f"report-{report_id}-full-context-part-1-of-{total_parts}.txt"
-                    ),
-                )
-            review_message = await log_ch.send(
-                embed=log_embed,
-                file=first_file,
-                view=ReportConversationLaunchView(self, report_id),
-            )
-            evidence_message_ids.append(review_message.id)
-            await self.db.set_call_report_review_messages(
-                report_id, review_message.channel.id, evidence_message_ids
-            )
+                        if len(transcript_parts) == 1
+                        else (
+                            f"report-{report_id}-full-context-part-{part_index + 1}"
+                            f"-of-{len(transcript_parts)}.txt"
+                        )
+                    )
+                    files.append(
+                        discord.File(
+                            io.BytesIO(transcript_parts[part_index]),
+                            filename=transcript_name,
+                        )
+                    )
+                if part_index < len(viewer_data_parts):
+                    viewer_name = (
+                        f"report-{report_id}-viewer-data.jsonl"
+                        if len(viewer_data_parts) == 1
+                        else (
+                            f"report-{report_id}-viewer-data-part-{part_index + 1}"
+                            f"-of-{len(viewer_data_parts)}.jsonl"
+                        )
+                    )
+                    files.append(
+                        discord.File(
+                            io.BytesIO(viewer_data_parts[part_index]),
+                            filename=viewer_name,
+                            spoiler=True,
+                        )
+                    )
 
-            for index, part in enumerate(transcript_parts[1:], start=2):
-                continuation = await log_ch.send(
-                    content=f"Call report #{report_id} full context, part {index} of {total_parts}.",
-                    file=discord.File(
-                        io.BytesIO(part),
-                        filename=f"report-{report_id}-full-context-part-{index}-of-{total_parts}.txt",
-                    ),
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-                evidence_message_ids.append(continuation.id)
+                if part_index == 0:
+                    evidence_message = await log_ch.send(
+                        embed=log_embed,
+                        files=files,
+                        view=ReportConversationLaunchView(self, report_id),
+                    )
+                else:
+                    evidence_message = await log_ch.send(
+                        content=(
+                            f"Call report #{report_id} evidence, part {index} of {total_parts}."
+                        ),
+                        files=files,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+                evidence_message_ids.append(evidence_message.id)
                 await self.db.set_call_report_review_messages(
-                    report_id, continuation.channel.id, evidence_message_ids
+                    report_id, evidence_message.channel.id, evidence_message_ids
                 )
-        except discord.HTTPException:
-            pass
+        except discord.HTTPException as exc:
+            log.warning("Could not send complete report evidence | report=%s | error=%s", report_id, exc)
 
     # ── /report ───────────────────────────────────────────────────────────────
 

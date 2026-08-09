@@ -22,6 +22,8 @@
 
 * New reports include an Open Conversation button for trusted moderators. It opens the full conversation privately with page controls and shows each speaker's profile picture when Discord provides one.
 
+* Report transcript attachments no longer print raw avatar links, and the conversation viewer now loads evidence through a more reliable Discord attachment path.
+
 * Private report evidence is scheduled for deletion when the report is resolved or after 30 days.
 
 * GIF and custom emoji submissions now use slash command fields. `/addemoji` and `/addemojis` both accept up to five custom emojis at once.

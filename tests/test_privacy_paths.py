@@ -48,6 +48,25 @@ class _EvidenceChannel:
         return _EvidenceMessage(message_id, self.deleted)
 
 
+class _ReportAttachment:
+    def __init__(self, filename: str, data: bytes):
+        self.filename = filename
+        self.data = data
+        self.read_modes: list[bool] = []
+
+    async def read(self, *, use_cached: bool = False):
+        self.read_modes.append(use_cached)
+        return self.data
+
+
+class _ReportEvidenceChannel:
+    def __init__(self, attachments):
+        self.attachments = attachments
+
+    async def fetch_message(self, _message_id: int):
+        return SimpleNamespace(attachments=self.attachments)
+
+
 def _message(
     message_id: int,
     user_id: int,
@@ -213,9 +232,31 @@ class ReportContextTests(unittest.IsolatedAsyncioTestCase):
             parsed[0]["content"],
             "first line\n----- FLIPHONE MESSAGE 999999 -----\nsecond line",
         )
-        self.assertEqual(parsed[0]["avatar_url"], "https://cdn.example/first.png")
+        self.assertEqual(parsed[0]["avatar_url"], "")
         self.assertEqual(parsed[1]["side"], "REPORTING")
         self.assertEqual(parsed[1]["user_id"], "22")
+        self.assertNotIn("Avatar URL", transcript)
+
+        viewer_data = report._build_viewer_data(
+            [
+                {
+                    "guild_id": 2,
+                    "username": "First Speaker",
+                    "user_id": None,
+                    "avatar_url": "https://cdn.example/first.png",
+                    "timestamp": "2026-08-04T12:00:01+00:00",
+                    "content": "message",
+                }
+            ],
+            reported_guild_id=2,
+            reporting_guild_id=1,
+        )
+        parsed_viewer_data = report._parse_viewer_data(viewer_data)
+        self.assertEqual(parsed_viewer_data[0]["side"], "REPORTED")
+        self.assertEqual(
+            parsed_viewer_data[0]["avatar_url"],
+            "https://cdn.example/first.png",
+        )
 
     def test_report_excerpt_uses_readable_message_blocks(self):
         report = Report(SimpleNamespace(db=_PrivacyDatabase(set())))
@@ -236,6 +277,37 @@ class ReportContextTests(unittest.IsolatedAsyncioTestCase):
             excerpt,
             "**Speaker** | `REPORTED` | `12:00:01`\n> A readable message",
         )
+
+    async def test_report_viewer_loads_spoiler_data_from_the_direct_attachment_url(self):
+        viewer_data = (
+            b'{"timestamp":"2026-08-04T12:00:01+00:00","side":"REPORTED",'
+            b'"username":"Speaker","user_id":null,"avatar_url":"https://cdn.example/a.png",'
+            b'"content":"message"}'
+        )
+        attachment = _ReportAttachment(
+            "SPOILER_report-7-viewer-data.jsonl",
+            viewer_data,
+        )
+        channel = _ReportEvidenceChannel([attachment])
+        bot = SimpleNamespace(
+            db=_PrivacyDatabase(set()),
+            get_channel=lambda _channel_id: channel,
+        )
+        report = Report(bot)
+
+        entries = await report._load_report_transcript(
+            {
+                "id": 7,
+                "review_channel_id": 123,
+                "review_msg_id": 456,
+                "review_message_ids": "456",
+            }
+        )
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["content"], "message")
+        self.assertEqual(entries[0]["avatar_url"], "https://cdn.example/a.png")
+        self.assertEqual(attachment.read_modes, [False])
 
     async def test_deleting_report_removes_every_evidence_part(self):
         channel = _EvidenceChannel()
