@@ -22,11 +22,12 @@ def shutdown_date_label() -> str:
 def shutdown_announcement_text() -> str:
     return (
         "Fliphone is returning for testing.\n\n"
-        "Discord has approved the privileged access the bot needs to relay messages. "
-        "The bot was previously taken offline because reliable hosting was unavailable, "
-        "but I am looking into bringing it back properly.\n\n"
-        "Hosting, database reliability, and future maintenance are still being worked out, "
-        "so availability may be limited while testing continues. Thank you for your patience."
+        "Discord has approved the application and the privileged access Fliphone needs to relay messages, "
+        "so we can bring the bot back. The bot was previously shut down after Discord rejected our application, "
+        "which meant it could not reliably provide its main feature.\n\n"
+        "As Fliphone comes back, I am looking for helpers who want to help test, improve, and grow the bot "
+        "so it can have a real team behind it. Hosting, database reliability, and future maintenance are still "
+        "being worked out, so availability may be limited while testing continues. Thank you for your patience."
     )
 
 
