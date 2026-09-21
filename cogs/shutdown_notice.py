@@ -21,18 +21,18 @@ def shutdown_date_label() -> str:
 
 def shutdown_announcement_text() -> str:
     return (
-        f"Fliphone is scheduled to shut down on **{shutdown_date_label()}**.\n\n"
-        "Discord will remove the privileged access Fliphone needs to relay messages. "
-        "The bot will continue working until the shutdown date.\n\n"
-        "Server admins may remove Fliphone now if they prefer. No action is required if you want "
-        "to keep using it until shutdown.\n\n"
-        "Thank you to everyone who used Fliphone and made its community possible."
+        "Fliphone is returning for testing.\n\n"
+        "Discord has approved the privileged access the bot needs to relay messages. "
+        "The bot was previously taken offline because reliable hosting was unavailable, "
+        "but I am looking into bringing it back properly.\n\n"
+        "Hosting, database reliability, and future maintenance are still being worked out, "
+        "so availability may be limited while testing continues. Thank you for your patience."
     )
 
 
 def shutdown_announcement_embed() -> discord.Embed:
     return discord.Embed(
-        title="Fliphone Service Shutdown Notice",
+        title="Fliphone Testing Update",
         description=shutdown_announcement_text(),
         color=config.COLOR_WARN,
     )
@@ -42,11 +42,11 @@ class ShutdownNotice(commands.Cog):
     """Updates Fliphone's profile and sends one notice per configured server."""
 
     SHUTDOWN_APPLICATION_DESCRIPTION = (
-        "Fliphone is scheduled to shut down on "
-        f"{shutdown_date_label()}. Thank you to everyone who used the bot."
+        "Fliphone is returning for testing after Discord approved its required access. "
+        "Reliable hosting and maintenance are being restored."
     )
     ACTIVE_APPLICATION_DESCRIPTION = (
-        "Anonymous cross-server conversations through 1:1 calls and group rooms."
+        "Fliphone is back for testing. Anonymous cross-server conversations through 1:1 calls and group rooms."
     )
 
     def __init__(self, bot) -> None:
